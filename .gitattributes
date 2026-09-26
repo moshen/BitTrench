@@ -1,0 +1,11 @@
+# Normalise every text file to LF in the repository and on checkout.
+# Without this, a Windows checkout rewrites Go sources, the embedded web UI
+# assets and the TOML samples to CRLF, and gofmt -l then names every file.
+* text=auto eol=lf
+
+# Binary, never touched.
+*.png binary
+*.jpg binary
+*.ico binary
+*.torrent binary
+*.db binary
