@@ -52,6 +52,11 @@ type WireGuardConfig struct {
 // APIConfig is the `[api]` table: the one listener that intentionally lives on
 // the host stack.
 type APIConfig struct {
+	// Enabled serves the Transmission RPC endpoint and the web UI. Turning it
+	// off opens no host listener at all, which leaves the WireGuard bind as
+	// the process's only host socket - and leaves nothing to drive the daemon
+	// with, so it is for unattended and one-shot runs. `get` forces it off.
+	Enabled         bool   `toml:"enabled"`
 	ListenInterface string `toml:"listen_interface"`
 	ListenPort      uint16 `toml:"listen_port"`
 	// Username and Password are HTTP Basic Auth credentials shared by the
@@ -121,6 +126,7 @@ type LoggingConfig struct {
 func Defaults() AppConfig {
 	return AppConfig{
 		API: APIConfig{
+			Enabled:         true,
 			ListenInterface: "127.0.0.1",
 			ListenPort:      6800,
 		},
@@ -202,8 +208,10 @@ func (c *AppConfig) Validate(ctx context.Context) error {
 	if len(servers) == 0 {
 		return fmt.Errorf("[wireguard] dns is required: without it no name can be resolved inside the tunnel")
 	}
-	if _, err := c.API.ListenAddr(); err != nil {
-		return err
+	if c.API.Enabled {
+		if _, err := c.API.ListenAddr(); err != nil {
+			return err
+		}
 	}
 	if c.Torrent.SavePath == "" {
 		return fmt.Errorf("[torrent] save_path is required")

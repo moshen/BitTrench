@@ -38,6 +38,30 @@ This fetches `https://api.ipify.org` through the tunnel - resolution included
 - and prints the exit IP. If that is not your VPN's address, nothing else in
 the daemon should be trusted yet.
 
+### Download one torrent and exit
+
+```sh
+bittrench -config config.toml get ./debian.torrent
+bittrench -config config.toml get -dir /mnt/media -timeout 2h 'magnet:?xt=urn:btih:...'
+```
+
+`get` takes one torrent - a magnet URI, an http(s) URL, or a path to a local
+`.torrent` - brings up the tunnel, downloads it, and exits. It opens **no host
+listener**: the Transmission RPC endpoint and the web UI are forced off for the
+run, so it works while the daemon proper is running and holding that port. It
+also does not restore the other torrents in the state database, so a one-shot
+run never starts seeding everything the daemon knows about.
+
+The torrent is still recorded in `state.db`, so an interrupted `get` resumes
+where it left off, and the daemon picks it up on its next start. It exits 0 once
+every selected file is complete, and non-zero on a torrent error or a `-timeout`
+that expires. With `allowed_extensions` set, "complete" means the files that
+passed the filter - the rest are never requested.
+
+To run the daemon itself with no RPC endpoint and no web UI, set
+`enabled = false` in the `[api]` table. That leaves the WireGuard bind as the
+only host socket the process holds.
+
 ### Windows service
 
 ```

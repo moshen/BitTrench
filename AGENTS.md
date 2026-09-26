@@ -22,6 +22,9 @@ rather than by mocks. A failure there is never "flaky infrastructure"; read it.
 
 - `internal/tunneltest` builds the two-ended tunnel. Use it for anything that
   needs a network, rather than reaching for the host stack in a test.
+- `cmd/bittrench` has tests for the argument handling only. The one-shot
+  `get` path shares its bring-up and its shutdown with the daemon through
+  `openSession`/`session.close`, so a change to either is exercised by both.
 - `internal/e2e` drives a real `.torrent` through the whole stack. It **skips**
   unless `BITTRENCH_E2E_TORRENT` points at one, so a green suite does not mean
   it ran. Run it by hand after touching the engine, the RPC layer or the API.
@@ -100,4 +103,10 @@ Breaking any of these is a bug even when the tests pass.
 8. **Shutdown order is correctness, not tidiness.** HTTP first, then the torrent
    client, then flush piece completion, then the database, then the device.
    `Client.Close()` emits a final round of completions, so flushing before it
-   loses exactly the pieces verified last.
+   loses exactly the pieces verified last. It lives in `session.close` once;
+   every entry point goes through it rather than repeating the sequence.
+9. **"Complete" means the selected files, not the torrent.**
+   `Torrent.BytesMissing` counts every incomplete piece whether it is wanted or
+   not, so `Status.MissingBytes` never reaches zero once any file is deselected
+   - by `allowed_extensions` or by hand. Anything waiting for a download to
+   finish waits on `Engine.SelectedBytes`.

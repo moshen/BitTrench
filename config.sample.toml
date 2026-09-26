@@ -25,6 +25,11 @@ keepalive_seconds = 25
 dns = "203.0.113.1, 203.0.113.2"
 
 [api]
+# Serve the Transmission RPC endpoint and the web UI. Turning this off opens no
+# host listener at all, which leaves the WireGuard bind as the only host socket
+# the process holds. It also leaves nothing to drive the daemon with, so it
+# suits unattended runs; the `get` subcommand forces it off for its own run.
+enabled = true
 listen_interface = "127.0.0.1"
 listen_port = 6800
 # HTTP Basic Auth for the Transmission RPC endpoint and the web UI. Both share

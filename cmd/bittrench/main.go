@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -36,6 +37,11 @@ const usage = `bittrench - user-space WireGuard BitTorrent engine
 
 usage:
   bittrench [-config PATH]                 run in the foreground
+  bittrench [-config PATH] get [-dir DIR] [-timeout DUR] TORRENT
+                                               download one torrent - a magnet
+                                               URI, an http(s) URL or a path to
+                                               a .torrent file - then exit.
+                                               Opens no host listener.
   bittrench [-config PATH] dial-through [URL]
                                                fetch URL through the tunnel and
                                                print the response (default:
@@ -88,6 +94,8 @@ func main() {
 		err = installService(absConfig, flag.Args()[1:])
 	case "uninstall":
 		err = uninstallService(flag.Args()[1:])
+	case "get":
+		err = get(ctx, absConfig, flag.Args()[1:])
 	case "dial-through":
 		url := flag.Arg(1)
 		if url == "" {
@@ -99,6 +107,11 @@ func main() {
 		fatal(fmt.Errorf("unknown command %q", cmd))
 	}
 	if err != nil {
+		// A subcommand's -h has already printed its own flags, and asking for
+		// help is not a failure to report or to exit non-zero on.
+		if errors.Is(err, flag.ErrHelp) {
+			return
+		}
 		fatal(err)
 	}
 }
@@ -106,6 +119,102 @@ func main() {
 func fatal(err error) {
 	fmt.Fprintf(os.Stderr, "error: %v\n", err)
 	os.Exit(1)
+}
+
+// session is everything a run brings up that must later be taken down, in the
+// order it must be taken down in. srv is nil when the API is disabled.
+type session struct {
+	db         *store.Store
+	completion *store.Completion
+	tun        *tunnel.Tunnel
+	eng        *engine.Engine
+	srv        *server.Server
+}
+
+// openSession brings up the state database, the tunnel, the engine and - when
+// [api] enabled is set - the one host listener. A caller that gets an error
+// owns nothing: everything opened before the failure is closed again here.
+func openSession(ctx context.Context, cfg *config.AppConfig, configPath string) (*session, error) {
+	dbPath := cfg.StateDBFile(configPath)
+	db, err := store.Open(dbPath)
+	if err != nil {
+		return nil, err
+	}
+	slog.Info("state database opened", "path", dbPath)
+
+	// fast_resume = false keeps completion in memory only, so every restart
+	// rehashes - which is exactly what turning it off means.
+	var completion *store.Completion
+	if cfg.Torrent.FastResume {
+		if completion, err = db.NewCompletion(ctx); err != nil {
+			db.Close()
+			return nil, err
+		}
+	} else {
+		completion = store.NewMemoryCompletion()
+		slog.Warn("fast_resume is off: every restart will rehash every torrent")
+	}
+
+	tun, err := startTunnel(ctx, cfg)
+	if err != nil {
+		completion.Close()
+		db.Close()
+		return nil, err
+	}
+
+	eng, err := engine.New(engine.Options{Config: cfg, Net: tun, Store: db, Completion: completion})
+	if err != nil {
+		completion.Close()
+		tun.Close()
+		db.Close()
+		return nil, err
+	}
+
+	s := &session{db: db, completion: completion, tun: tun, eng: eng}
+	if cfg.API.Enabled {
+		if s.srv, err = server.New(cfg, eng); err != nil {
+			s.close()
+			return nil, err
+		}
+	}
+	return s, nil
+}
+
+// close takes the session down in the documented order, which is correctness
+// and not tidiness: Client.Close() emits a final round of piece completions on
+// the way down, so flushing before it loses exactly the pieces verified last -
+// which looks like a fast-resume bug rather than a shutdown-ordering one. See
+// AGENTS.md.
+//
+// The whole sequence gets a hard deadline because the Windows SCM kills a
+// service whose StopPending runs long.
+func (s *session) close() {
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if s.srv != nil {
+			// 1. stop accepting HTTP, so nothing is reading from the client
+			// when it closes underneath.
+			if err := s.srv.Shutdown(ctx); err != nil {
+				slog.Error("failed to stop the API server", "error", err)
+			}
+		}
+		s.eng.Close()                                // 2. peers and storage, after HTTP
+		if err := s.completion.Close(); err != nil { // 3. flush, after Close
+			slog.Error("failed to flush piece completion", "error", err)
+		}
+		if err := s.db.Close(); err != nil { // 4. WAL checkpoint
+			slog.Error("failed to close the state database", "error", err)
+		}
+		s.tun.Close() // 5. the device last
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		slog.Error("shutdown timed out", "timeout", shutdownTimeout)
+	}
 }
 
 // run brings the daemon up and serves until ctx is cancelled by Ctrl-C or
@@ -121,39 +230,13 @@ func run(ctx context.Context, configPath string) error {
 	}
 	slog.Info("configuration loaded", "config", configPath)
 
-	dbPath := cfg.StateDBFile(configPath)
-	db, err := store.Open(dbPath)
+	s, err := openSession(ctx, &cfg, configPath)
 	if err != nil {
 		return err
 	}
-	defer db.Close()
-	slog.Info("state database opened", "path", dbPath)
+	defer s.close()
 
-	// fast_resume = false keeps completion in memory only, so every restart
-	// rehashes - which is exactly what turning it off means.
-	var completion *store.Completion
-	if cfg.Torrent.FastResume {
-		if completion, err = db.NewCompletion(ctx); err != nil {
-			return err
-		}
-	} else {
-		completion = store.NewMemoryCompletion()
-		slog.Warn("fast_resume is off: every restart will rehash every torrent")
-	}
-
-	tun, err := startTunnel(ctx, &cfg)
-	if err != nil {
-		completion.Close()
-		return err
-	}
-
-	eng, err := engine.New(engine.Options{Config: &cfg, Net: tun, Store: db, Completion: completion})
-	if err != nil {
-		completion.Close()
-		tun.Close()
-		return err
-	}
-	if err := eng.Restore(ctx); err != nil {
+	if err := s.eng.Restore(ctx); err != nil {
 		// A torrent that will not come back is worth reporting, but it is not
 		// a reason to refuse to start with the others.
 		slog.Error("some torrents could not be restored", "error", err)
@@ -164,53 +247,157 @@ func run(ctx context.Context, configPath string) error {
 			"UPnP would have to reach the provider's gateway through the tunnel, which is not supported")
 	}
 
-	srv, err := server.New(&cfg, eng)
-	if err != nil {
-		eng.Close()
-		completion.Close()
-		tun.Close()
-		return err
+	if s.srv != nil {
+		go s.srv.Serve()
+		slog.Info("API and web UI listening", "addr", s.srv.Addr(),
+			"rpc", "http://"+s.srv.Addr().String()+rpc.Path)
+	} else {
+		slog.Warn("[api] enabled = false: no Transmission RPC endpoint and no web UI; " +
+			"this run can only be steered by restarting it")
 	}
-	go srv.Serve()
-	slog.Info("API and web UI listening", "addr", srv.Addr(),
-		"rpc", "http://"+srv.Addr().String()+rpc.Path)
 
 	slog.Info("running; press ctrl-c to stop")
 	<-ctx.Done()
-
-	// The shutdown order is documented in AGENTS.md and is correctness-critical,
-	// not tidiness: Client.Close() emits a final round of piece completions on
-	// the way down, so flushing before it loses exactly the pieces verified
-	// last - which looks like a fast-resume bug rather than a shutdown-ordering
-	// one.
 	slog.Info("shutting down")
-	shutdown, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-	defer cancel()
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		// 1. stop accepting HTTP, so nothing is reading from the client when
-		// it closes underneath.
-		if err := srv.Shutdown(shutdown); err != nil {
-			slog.Error("failed to stop the API server", "error", err)
-		}
-		eng.Close()                                // 2. peers and storage, after HTTP
-		if err := completion.Close(); err != nil { // 3. flush, after Close
-			slog.Error("failed to flush piece completion", "error", err)
-		}
-		if err := db.Close(); err != nil { // 4. WAL checkpoint
-			slog.Error("failed to close the state database", "error", err)
-		}
-		tun.Close() // 5. the device last
-	}()
-	select {
-	case <-done:
-	case <-shutdown.Done():
-		// The Windows SCM kills a service whose StopPending runs long, so the
-		// sequence gets a hard deadline rather than hanging on a stuck peer.
-		slog.Error("shutdown timed out", "timeout", shutdownTimeout)
-	}
 	return nil
+}
+
+// getPollInterval is how often a one-shot download re-reads its progress, and
+// getProgressInterval how often it says so.
+const (
+	getPollInterval     = time.Second
+	getProgressInterval = 5 * time.Second
+)
+
+// get downloads exactly one torrent and exits.
+//
+// It deliberately does not restore the database's other torrents: a one-shot
+// run has no business starting to seed everything the daemon knows about. The
+// torrent itself is still recorded, so an interrupted `get` resumes rather than
+// starting over, and the daemon proper picks it up on its next start.
+func get(ctx context.Context, configPath string, args []string) error {
+	fs := flag.NewFlagSet("get", flag.ContinueOnError)
+	dir := fs.String("dir", "", "download directory (default: the [torrent] save_path)")
+	timeout := fs.Duration("timeout", 0, "give up after this long, e.g. 30m (default: wait indefinitely)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("get takes exactly one torrent: a magnet URI, an http(s) URL, " +
+			"or a path to a .torrent file")
+	}
+	req, err := addRequest(fs.Arg(0), *dir)
+	if err != nil {
+		return err
+	}
+
+	cfg, err := config.Load(ctx, configPath)
+	if err != nil {
+		return err
+	}
+	// Nothing outlives the download, so the RPC endpoint and the web UI have
+	// nobody to serve - and binding their port would fail outright whenever the
+	// daemon proper already holds it. Forced rather than merely defaulted off:
+	// a one-shot run must work against an unmodified config.
+	cfg.API.Enabled = false
+
+	writer := logging.Setup(cfg.LogDir(configPath), "bittrench", cfg.Logging.MaxAgeDays)
+	if writer != nil {
+		defer writer.Close()
+	}
+	slog.Info("configuration loaded", "config", configPath)
+
+	if *timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, *timeout)
+		defer cancel()
+	}
+
+	s, err := openSession(ctx, &cfg, configPath)
+	if err != nil {
+		return err
+	}
+	defer s.close()
+
+	id, err := s.eng.Add(ctx, req)
+	if err != nil {
+		return err
+	}
+	if err := waitForDownload(ctx, s.eng, id); err != nil {
+		return err
+	}
+	slog.Info("download complete", "id", id)
+	return nil
+}
+
+// addRequest turns the one command-line argument into an AddRequest. A magnet
+// URI or an http(s) URL is handed over as a Source for the engine to fetch
+// through the tunnel; anything else is read as a local .torrent file. Exactly
+// one of the two fields is set, which is what the engine's spec() expects.
+func addRequest(source, dir string) (engine.AddRequest, error) {
+	req := engine.AddRequest{DownloadDir: dir}
+	switch {
+	case strings.HasPrefix(source, "magnet:"),
+		strings.HasPrefix(source, "http://"),
+		strings.HasPrefix(source, "https://"):
+		req.Source = source
+	default:
+		blob, err := os.ReadFile(source)
+		if err != nil {
+			return req, fmt.Errorf("failed to read the torrent file %s: %w", source, err)
+		}
+		req.Metainfo = blob
+	}
+	return req, nil
+}
+
+// waitForDownload polls until every selected file is complete, the torrent
+// reports an error, or ctx is cancelled.
+//
+// It waits on engine.SelectedBytes rather than on Status.MissingBytes, which
+// never reaches zero for a torrent whose files are not all selected - an
+// extension allow-list would otherwise make this wait forever. Polling rather
+// than an event: anacrolix signals per-piece completion, which says nothing
+// about the file selection that decides "done" here.
+func waitForDownload(ctx context.Context, eng *engine.Engine, id int64) error {
+	ticker := time.NewTicker(getPollInterval)
+	defer ticker.Stop()
+
+	var lastLog time.Time
+	for {
+		st, ok := eng.Status(id)
+		if !ok {
+			return fmt.Errorf("torrent %d is no longer managed", id)
+		}
+		if st.Error != "" {
+			return fmt.Errorf("torrent %d (%s) failed: %s", id, st.Name, st.Error)
+		}
+		completed, total, files := eng.SelectedBytes(id)
+		if files > 0 && completed >= total {
+			return nil
+		}
+		if now := time.Now(); now.Sub(lastLog) >= getProgressInterval {
+			lastLog = now
+			slog.Info("downloading", "name", st.Name, "state", st.State,
+				"percent", percent(completed, total), "completed", completed, "total", total,
+				"down_bytes_per_sec", int64(st.DownloadRate), "peers", st.Peers, "seeders", st.Seeders)
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("gave up waiting for %s: %w", st.Name, ctx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+// percent reports progress, and 0 before metadata has set a total - a zero
+// denominator is the normal state for a magnet's first few seconds, not an
+// error.
+func percent(completed, total int64) int {
+	if total <= 0 {
+		return 0
+	}
+	return int(completed * 100 / total)
 }
 
 // serveUnderSCM runs the daemon under the Windows Service Control Manager,

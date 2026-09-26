@@ -34,6 +34,7 @@ func TestSampleDocumentsTheKeys(t *testing.T) {
 		"max_peers_per_torrent",
 		"listen_in_tunnel",
 		"enable_pex",
+		"enabled",
 	} {
 		if !strings.Contains(string(sample), key) {
 			t.Errorf("config.sample.toml does not document %s", key)
@@ -79,6 +80,39 @@ func TestDefaultsSurviveAnAbsentKey(t *testing.T) {
 	}
 	if cfg.Torrent.ListenInTunnel {
 		t.Error("listen_in_tunnel should default to false")
+	}
+	// An existing config that has never heard of the key must keep its API.
+	if !cfg.API.Enabled {
+		t.Error("api.enabled should default to true")
+	}
+}
+
+// Turning the API off must not then be rejected for the bind address it is no
+// longer going to use, and must survive as an explicit false.
+func TestAPICanBeDisabled(t *testing.T) {
+	cfg, err := Parse("[api]\nenabled = false\nlisten_interface = \"not-an-ip\"\n" +
+		"[torrent]\nsave_path = \"/tmp\"\n")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if cfg.API.Enabled {
+		t.Fatal("explicit enabled = false became true")
+	}
+	cfg.WireGuard = WireGuardConfig{
+		PrivateKey:    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+		PeerPublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+		Endpoint:      "198.51.100.5:51820",
+		ClientIP:      "10.0.0.2/32",
+		DNS:           "10.0.0.1",
+	}
+	if err := cfg.Validate(context.Background()); err != nil {
+		t.Errorf("a disabled API should not be validated for its bind address: %v", err)
+	}
+
+	// With the API on, that same address is a startup error.
+	cfg.API.Enabled = true
+	if err := cfg.Validate(context.Background()); err == nil {
+		t.Error("an enabled API with an unparseable listen_interface should be rejected")
 	}
 }
 

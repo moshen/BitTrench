@@ -135,6 +135,30 @@ func (e *Engine) Files(id int64) []File {
 	return out
 }
 
+// SelectedBytes returns how many bytes of the files a torrent actually wants
+// are complete, out of how many, and how many files are selected.
+//
+// This, not Status, is the honest progress and completion signal for a torrent
+// whose files are not all selected. Torrent.BytesMissing counts every
+// incomplete piece whether it is wanted or not, so an extension allow-list -
+// or any deselected file - leaves MissingBytes above zero for good and
+// CompletedBytes measured against data that will never arrive. Anything
+// waiting for MissingBytes to reach zero waits forever.
+//
+// files is 0 before metadata arrives and for an unknown gid, which is how a
+// caller tells "nothing is selected yet" from "all of it is done".
+func (e *Engine) SelectedBytes(id int64) (completed, total int64, files int) {
+	for _, f := range e.Files(id) {
+		if !f.Selected {
+			continue
+		}
+		completed += f.Completed
+		total += f.Length
+		files++
+	}
+	return completed, total, files
+}
+
 // Bitfield returns the completed-pieces bitfield and the piece count.
 // Returning the count explicitly is what stops the last byte's padding bits
 // from reading as missing pieces in the UI.
