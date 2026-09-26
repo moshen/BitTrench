@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="stylesheet" href="/web/styles.css">
+<title>BitTrench</title>
+</head>
+<body>
+<header>
+    <h1>BitTrench</h1>
+    <span class="version" id="version"></span>
+    <span class="spacer"></span>
+    <button type="button" id="add-btn" class="primary">+ Add torrent</button>
+</header>
+
+<div class="toolbar">
+    <input type="search" class="search" id="search" placeholder="Filter by name…">
+    <button type="button" class="filter-btn active" data-filter="all">All</button>
+    <button type="button" class="filter-btn" data-filter="live">Downloading</button>
+    <button type="button" class="filter-btn" data-filter="paused">Paused</button>
+    <button type="button" class="filter-btn" data-filter="finished">Finished</button>
+    <button type="button" class="filter-btn" data-filter="error">Error</button>
+    <label>Sort: <select id="sort-key">
+        <option value="name">Name</option>
+        <option value="size">Size</option>
+        <option value="progress">Progress</option>
+        <option value="speed">Down speed</option>
+    </select></label>
+    <select id="sort-dir">
+        <option value="asc">Asc</option>
+        <option value="desc">Desc</option>
+    </select>
+</div>
+
+<main>
+    <table class="torrents" id="torrent-table">
+        <thead>
+        <tr>
+            <th class="cell-status"></th>
+            <th data-sort="name" class="sorted-asc">Name</th>
+            <th>Progress</th>
+            <th class="num" data-sort="size">Size</th>
+            <th class="num" data-sort="speed">↓ Speed</th>
+            <th class="num">↑ Speed</th>
+            <th class="num">Peers</th>
+            <th class="num">ETA</th>
+            <th>Actions</th>
+        </tr>
+        </thead>
+        <tbody id="torrent-tbody"><tr><td colspan="9" class="empty">Loading…</td></tr></tbody>
+    </table>
+</main>
+
+<footer>
+    <span class="stat">↓ <b id="dl-speed">0 B/s</b></span>
+    <span class="stat">↑ <b id="ul-speed">0 B/s</b></span>
+    <span class="stat">downloaded <b id="fetched">0 B</b></span>
+    <span class="stat">uploaded <b id="uploaded">0 B</b></span>
+    <span class="stat">peers <b id="peer-count">0</b></span>
+    <span class="stat"><b id="uptime">0 active</b></span>
+    <span class="spacer" style="flex:1"></span>
+    <canvas id="sparkline" width="200" height="36"></canvas>
+</footer>
+
+<dialog id="add-dialog">
+    <form>
+        <h2>Add torrent</h2>
+        <div class="row">
+            <label for="add-magnet">Magnet link or HTTP(S) URL</label>
+            <textarea id="add-magnet" placeholder="magnet:?xt=urn:btih:…  or  https://example.com/file.torrent"></textarea>
+        </div>
+        <div class="row">
+            <label for="add-folder">Output folder (optional, overrides default save path)</label>
+            <input type="text" id="add-folder" placeholder="(use default)">
+        </div>
+        <div class="row">
+            <label for="add-file">…or upload a <code>.torrent</code> file</label>
+            <input type="file" id="add-file" accept=".torrent">
+        </div>
+        <div class="actions">
+            <span id="add-status" class="add-status"></span>
+            <button type="button" value="cancel" id="add-cancel">Cancel</button>
+            <button type="submit" value="submit" class="primary" id="add-submit">Add</button>
+        </div>
+    </form>
+</dialog>
+
+<script src="/web/app.js"></script>
+</body>
+</html>

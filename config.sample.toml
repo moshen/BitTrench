@@ -1,0 +1,96 @@
+# BitTrench: a user-space WireGuard BitTorrent daemon.
+#
+# Copy this to config.toml and fill in the [wireguard] section from your VPN
+# provider's configuration. Unknown keys are a startup error, not a warning, so
+# a typo is reported rather than ignored.
+
+[wireguard]
+# Replace these with the base64 values from your own WireGuard configuration.
+private_key = "BASE64_PRIVATE_KEY="
+peer_public_key = "BASE64_PEER_PUBLIC_KEY="
+# Hostname:port or IP:port of your VPN provider's WireGuard endpoint.
+endpoint = "vpn-provider.example.com:51820"
+# The virtual IP/CIDR your VPN provider assigned you (matches the `Address`
+# field in your WireGuard config file, e.g. 10.0.0.2/32).
+client_ip = "10.0.0.2/32"
+# Persistent keepalive interval in seconds. 0 disables.
+keepalive_seconds = 25
+# Comma-separated DNS server IPs for the tunnel-resident resolver.
+#
+# REQUIRED: the daemon refuses to start without it. Queries go out over UDP/53
+# through the user-space tunnel, which covers all three paths that would
+# otherwise reach the host resolver: DHT bootstrap hostnames, UDP tracker
+# hostnames, and HTTP(S) tracker URLs. Without it every lookup a torrent implies
+# would fall back to the host, and the tunnel would be decorative.
+dns = "203.0.113.1, 203.0.113.2"
+
+[api]
+listen_interface = "127.0.0.1"
+listen_port = 6800
+# HTTP Basic Auth for the Transmission RPC endpoint and the web UI. Both share
+# the same port and credentials. Comment both out to disable authentication,
+# which is reasonable for localhost-only use.
+username = "change-me"
+password = "change-me"
+
+[torrent]
+save_path = "/path/to/torrents"
+fast_resume = true
+enable_dht = true
+# Has no effect, and is kept only so existing configuration files keep loading.
+# Port forwarding would have to reach your provider's gateway from inside the
+# tunnel, which is not supported. Setting it to `false` logs a warning at
+# startup rather than silently doing nothing.
+disable_upnp_port_forward = true
+peer_connect_timeout_secs = 10
+# Optional override for the SQLite state database location. Defaults to
+# `state.db` in the same directory as this config file.
+# state_db_path = "/var/lib/bittrench/state.db"
+# Optional allow-list of file extensions. When non-empty, only files whose
+# extension is in the list are downloaded and everything else in the torrent is
+# skipped. Extensions match case-insensitively, with or without a leading dot
+# (`mkv` or `.mkv`). A torrent whose files all fall outside the allow-list is
+# reported as failed to clients through `error`/`errorString` and never starts
+# downloading. An empty list, the default, disables the filter.
+#
+# Progress and completion are measured against the files that pass the filter,
+# so a torrent counts as finished once those have arrived.
+# allowed_extensions = ["mkv", "mp4", "avi"]
+
+# Accept inbound BitTorrent connections *inside* the tunnel. No host socket is
+# opened either way, so this is not a leak, but peers can only reach you if your
+# VPN provider forwards a port to your tunnel IP. Default: false
+# listen_in_tunnel = false
+# listen_port = 6881
+
+# Peer exchange. Trades peer lists with peers already reached through the
+# tunnel, so it is not a leak, but it does widen who learns you are in a swarm.
+# On public swarms PEX is a significant peer source alongside DHT; turn it on if
+# you want peers more than you want a minimal footprint. Default: false
+# enable_pex = false
+
+[torrent.limits]
+# Rate limits in kbps. 0 means unlimited.
+download_rate_limit_kbps = 0
+upload_rate_limit_kbps = 500
+# Target seed ratio. A finished torrent that reaches this ratio
+# (uploaded / total_bytes) is paused, which caps seeding. 0.0 disables the cap.
+# A client can override this per torrent. Default: 2.0
+seed_ratio_limit = 2.0
+# Maximum seeding time in seconds after a torrent finishes downloading. Once the
+# elapsed time since it finished exceeds this, the torrent is paused. 0 disables
+# the time cap, and a client can override it per torrent. Default: 0 (disabled)
+seed_time_limit_secs = 0
+# Maximum concurrently connected peers per torrent. Commented out means the
+# torrent engine's own default of 50 applies. 0 is rejected at startup, since it
+# would allow no peer connections at all.
+# max_peers_per_torrent = 100
+
+[logging]
+# Directory for the daily-rotating log files. Defaults to a `logs/`
+# subdirectory next to this config file. Worth setting explicitly when running
+# as a Windows service, where the process working directory is
+# `C:\Windows\System32` and a relative default would land in the wrong place.
+# log_dir = "C:\\ProgramData\\bittrench\\logs"
+# Delete log files older than this many days. 0 disables cleanup. Default: 7
+max_age_days = 7

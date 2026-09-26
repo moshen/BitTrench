@@ -1,0 +1,10 @@
+# Built binaries
+/bittrench
+/bittrench.exe
+
+# Runtime state, written beside the config file
+/config.toml
+/state.db
+/state.db-shm
+/state.db-wal
+/logs/

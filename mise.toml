@@ -1,0 +1,14 @@
+[tools]
+go = "latest"
+# biome lints and formats the embedded web UI under internal/webui/assets/.
+biome = "latest"
+
+[env]
+# `noboltdb` keeps go.etcd.io/bbolt out of the binary. anacrolix/torrent's
+# storage package selects a piece-completion backend by build tag: the SQLite
+# one is cgo-only, so a CGO_ENABLED=0 build would otherwise link the bbolt
+# fallback. We supply our own SQLite-backed storage.PieceCompletion and never
+# call NewDefaultPieceCompletionForDir, so the fallback is dead weight - and
+# one persistence backend, not two, is the point.
+GOFLAGS = "-tags=noboltdb"
+CGO_ENABLED = "0"

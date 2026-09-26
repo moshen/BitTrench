@@ -1,0 +1,467 @@
+:root {
+	--bg: #ffffff;
+	--fg: #111827;
+	--muted: #6b7280;
+	--border: #d1d5db;
+	--row-hover: #f3f4f6;
+	--row-selected: #93c5fd;
+	--accent: #2563eb;
+	--bar-bg: #d1d5db;
+	--bar-fill: #3b82f6;
+	--bar-done: #10b981;
+	--bar-error: #ef4444;
+	--bar-paused: #9ca3af;
+	--canvas-bg: #f9fafb;
+	--canvas-grid: #e5e7eb;
+	--canvas-line-down: #2563eb;
+	--canvas-line-up: #10b981;
+	--piece-have: #2563eb;
+	--piece-missing: #f97316;
+	--piece-empty: #dbeafe;
+}
+@media (prefers-color-scheme: dark) {
+	:root {
+		--bg: #0f172a;
+		--fg: #e5e7eb;
+		--muted: #94a3b8;
+		--border: #334155;
+		--row-hover: #1e293b;
+		--row-selected: #1d4ed8;
+		--accent: #60a5fa;
+		--bar-bg: #1e293b;
+		--bar-fill: #3b82f6;
+		--bar-done: #10b981;
+		--bar-error: #ef4444;
+		--bar-paused: #64748b;
+		--canvas-bg: #0b1220;
+		--canvas-grid: #1e293b;
+		--canvas-line-down: #60a5fa;
+		--canvas-line-up: #34d399;
+		--piece-have: #60a5fa;
+		--piece-missing: #f59e0b;
+		--piece-empty: #1e3a8a;
+	}
+}
+* {
+	box-sizing: border-box;
+}
+body {
+	margin: 0;
+	font:
+		14px / 1.5 -apple-system,
+		BlinkMacSystemFont,
+		"Segoe UI",
+		Roboto,
+		sans-serif;
+	background: var(--bg);
+	color: var(--fg);
+	display: flex;
+	flex-direction: column;
+	min-height: 100vh;
+}
+header,
+footer {
+	flex: 0 0 auto;
+}
+main {
+	flex: 1 0 auto;
+	padding: 12px 12px 60px;
+}
+
+header {
+	display: flex;
+	align-items: center;
+	padding: 10px 16px;
+	border-bottom: 1px solid var(--border);
+	gap: 12px;
+}
+header h1 {
+	font-size: 16px;
+	margin: 0;
+}
+header .version {
+	color: var(--muted);
+	font-size: 12px;
+}
+header .spacer {
+	flex: 1;
+}
+
+button,
+input[type="text"],
+input[type="search"],
+textarea,
+select {
+	font: inherit;
+	color: var(--fg);
+	background: var(--bg);
+	border: 1px solid var(--border);
+	border-radius: 6px;
+	padding: 6px 10px;
+}
+button {
+	cursor: pointer;
+}
+button:hover {
+	border-color: var(--accent);
+}
+button.primary {
+	background: var(--accent);
+	color: #fff;
+	border-color: var(--accent);
+}
+button.danger {
+	color: var(--bar-error);
+}
+button.icon {
+	padding: 4px 8px;
+}
+
+.toolbar {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	align-items: center;
+	padding: 8px 12px;
+	border-bottom: 1px solid var(--border);
+}
+.toolbar label {
+	display: inline-flex;
+	gap: 4px;
+	align-items: center;
+	color: var(--muted);
+}
+.toolbar .search {
+	flex: 1;
+	min-width: 200px;
+}
+.filter-btn {
+	color: var(--muted);
+}
+.filter-btn.active {
+	color: var(--accent);
+	border-color: var(--accent);
+	font-weight: 600;
+}
+
+table.torrents {
+	width: 100%;
+	border-collapse: collapse;
+}
+table.torrents th,
+table.torrents td {
+	text-align: left;
+	padding: 6px 8px;
+	border-bottom: 1px solid var(--border);
+	vertical-align: middle;
+}
+table.torrents th {
+	font-weight: 600;
+	color: var(--muted);
+	cursor: pointer;
+	user-select: none;
+	white-space: nowrap;
+}
+table.torrents th.sorted-asc::after {
+	content: " ▲";
+}
+table.torrents th.sorted-desc::after {
+	content: " ▼";
+}
+table.torrents tbody tr {
+	cursor: pointer;
+}
+table.torrents tbody tr:hover {
+	background: var(--row-hover);
+}
+table.torrents tbody tr.selected {
+	background: var(--row-selected);
+}
+table.torrents .name {
+	font-weight: 500;
+}
+table.torrents .num {
+	text-align: right;
+	font-variant-numeric: tabular-nums;
+	white-space: nowrap;
+}
+.cell-status {
+	width: 24px;
+	text-align: center;
+}
+
+.progress {
+	position: relative;
+	height: 14px;
+	background: var(--bar-bg);
+	border-radius: 4px;
+	overflow: hidden;
+	min-width: 120px;
+	flex: 1 1 auto;
+}
+.progress > .bar {
+	position: absolute;
+	left: 0;
+	top: 0;
+	bottom: 0;
+	background: var(--bar-fill);
+	transition: width 0.3s ease;
+}
+.progress.done > .bar {
+	background: var(--bar-done);
+}
+.progress.error > .bar {
+	background: var(--bar-error);
+}
+.progress.paused > .bar {
+	background: var(--bar-paused);
+}
+.pct {
+	flex: 0 0 auto;
+	text-align: right;
+	color: var(--fg);
+	font-size: 11px;
+	line-height: 14px;
+	font-variant-numeric: tabular-nums;
+	font-weight: 600;
+	white-space: nowrap;
+	padding-left: 6px;
+}
+.progress-cell {
+	display: flex;
+	align-items: center;
+}
+
+.expand {
+	padding: 8px 16px 16px;
+	background: var(--row-hover);
+	border-bottom: 1px solid var(--border);
+}
+.expand h3 {
+	margin: 4px 0 10px;
+	font-size: 13px;
+	color: var(--muted);
+	font-weight: 600;
+}
+.expand .subgrid {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+	gap: 16px;
+}
+.expand table.peers,
+.expand table.files,
+.expand table.info {
+	width: 100%;
+	border-collapse: collapse;
+}
+.expand table.peers th,
+.expand table.peers td,
+.expand table.files th,
+.expand table.files td,
+.expand table.info th,
+.expand table.info td {
+	padding: 3px 6px;
+	border-bottom: 1px solid var(--border);
+	text-align: left;
+	font-size: 12px;
+}
+.expand table.peers td.num,
+.expand table.files td.num {
+	text-align: right;
+	font-variant-numeric: tabular-nums;
+}
+.expand table.info th {
+	color: var(--muted);
+	font-weight: 600;
+	width: 80px;
+	white-space: nowrap;
+}
+.expand table.info td {
+	font-variant-numeric: tabular-nums;
+}
+.expand canvas.pieces {
+	display: block;
+	background: var(--canvas-bg);
+	border: 1px solid var(--border);
+	max-width: 100%;
+	image-rendering: crisp-edges;
+}
+
+footer {
+	position: sticky;
+	bottom: 0;
+	z-index: 10;
+	display: flex;
+	align-items: center;
+	gap: 16px;
+	padding: 8px 16px;
+	border-top: 1px solid var(--border);
+	background: var(--bg);
+	font-size: 12px;
+	color: var(--muted);
+}
+footer canvas {
+	width: 200px;
+	height: 36px;
+	background: var(--canvas-bg);
+	border: 1px solid var(--border);
+	image-rendering: crisp-edges;
+}
+footer .stat {
+	display: inline-flex;
+	gap: 4px;
+	align-items: baseline;
+}
+footer .stat b {
+	color: var(--fg);
+	font-variant-numeric: tabular-nums;
+}
+
+dialog {
+	color: var(--fg);
+	background: var(--bg);
+	border: 1px solid var(--border);
+	border-radius: 8px;
+	padding: 0;
+	width: min(640px, 92vw);
+}
+dialog::backdrop {
+	background: rgba(0, 0, 0, 0.4);
+}
+dialog form {
+	padding: 16px;
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+}
+dialog h2 {
+	margin: 0 0 4px;
+	font-size: 16px;
+}
+dialog .row {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+dialog textarea {
+	min-height: 80px;
+	resize: vertical;
+	font-family: ui-monospace, monospace;
+}
+dialog .actions {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+.add-status {
+	flex: 1;
+	font-size: 12px;
+	color: var(--muted);
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+.add-status.error {
+	color: var(--bar-error);
+}
+
+.spinner {
+	display: inline-block;
+	width: 14px;
+	height: 14px;
+	border: 2px solid var(--border);
+	border-top-color: var(--accent);
+	border-radius: 50%;
+	animation: spin 0.7s linear infinite;
+	vertical-align: middle;
+}
+@keyframes spin {
+	to {
+		transform: rotate(360deg);
+	}
+}
+
+.status-dot {
+	display: inline-block;
+	width: 10px;
+	height: 10px;
+	border-radius: 50%;
+	vertical-align: middle;
+}
+.status-dot.live {
+	background: var(--bar-fill);
+}
+.status-dot.paused {
+	background: transparent;
+	border: 2px solid var(--bar-paused);
+	width: 8px;
+	height: 8px;
+}
+.status-dot.finished {
+	background: var(--bar-done);
+}
+.status-dot.error {
+	background: var(--bar-error);
+}
+.status-dot.initializing {
+	background: #f59e0b;
+}
+.status-icon {
+	display: inline-flex;
+	width: 14px;
+	height: 14px;
+	align-items: center;
+	justify-content: center;
+	font-size: 11px;
+	vertical-align: middle;
+	font-weight: 700;
+}
+.status-icon.paused {
+	color: var(--bar-paused);
+}
+.status-label {
+	display: inline-flex;
+	gap: 4px;
+	align-items: center;
+	font-size: 11px;
+	color: var(--bar-paused);
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+}
+
+tr.pending-row {
+	background: var(--row-hover);
+}
+tr.pending-row > td {
+	padding: 6px;
+}
+tr.pending-row > td.name {
+	font-style: italic;
+	color: var(--muted);
+}
+
+tr.torrent-row.paused {
+	opacity: 0.55;
+}
+tr.torrent-row.paused > td.name {
+	font-style: italic;
+	color: var(--muted);
+}
+tr.torrent-row.paused > td.name::before {
+	content: "❚❚ ";
+	color: var(--bar-paused);
+	font-style: normal;
+	font-weight: 700;
+}
+
+.empty {
+	padding: 40px;
+	text-align: center;
+	color: var(--muted);
+}
+.error-banner {
+	background: var(--bar-error);
+	color: #fff;
+	padding: 8px 12px;
+}
