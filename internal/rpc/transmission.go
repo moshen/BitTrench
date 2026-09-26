@@ -31,12 +31,18 @@ import (
 	"github.com/moshen/bittrench/internal/engine"
 )
 
-// Transmission status codes, as the *arr clients interpret them.
+// Transmission status codes, as the *arr clients interpret them. The whole set
+// is spelled out because the clients test against specific values - Sonarr
+// reads a torrent as complete when its status is stopped, seeding or seed-wait,
+// and refuses to when it is check or check-wait.
 const (
-	trStatusStopped     = 0
-	trStatusCheckWait   = 1
-	trStatusDownloading = 4
-	trStatusSeeding     = 6
+	trStatusStopped      = 0
+	trStatusCheckWait    = 1
+	trStatusCheck        = 2
+	trStatusDownloadWait = 3
+	trStatusDownloading  = 4
+	trStatusSeedWait     = 5
+	trStatusSeeding      = 6
 )
 
 // trStatLocalError is Transmission's TR_STAT_LOCAL_ERROR. A non-zero `error`
@@ -61,6 +67,7 @@ type Torrents interface {
 	Status(id int64) (engine.Status, bool)
 	List() []engine.Status
 	Files(id int64) []engine.File
+	SelectedBytes(id int64) (completed, total int64, files int)
 	Start(ctx context.Context, id int64) error
 	Stop(ctx context.Context, id int64) error
 	Remove(ctx context.Context, id int64, deleteData bool) error
@@ -431,9 +438,39 @@ func parseIDs(raw json.RawMessage) (ids map[int64]bool, filtered bool, err error
 // torrentFields is the full field set. Projection to the client's `fields`
 // list happens afterwards.
 func (h *Handler) torrentFields(s engine.Status, files []engine.File) map[string]any {
+	// Transmission measures leftUntilDone, sizeWhenDone, percentDone and
+	// isFinished against the files the torrent *wants*; only totalSize,
+	// haveValid and percentComplete are whole-torrent numbers. Reporting the
+	// whole torrent for the first group leaves a filtered torrent - one under
+	// an allowed_extensions allow-list - permanently 90%-and-downloading, so
+	// Sonarr's `leftUntilDone == 0` and `isFinished` completion tests never
+	// fire and the release is never imported.
+	selCompleted, selTotal, selFiles := h.engine.SelectedBytes(s.ID)
+	haveSelection := selFiles > 0
+
+	// Before metadata there is no selection to measure, so fall back to the
+	// whole-torrent figures rather than reporting a confident zero.
+	sizeWhenDone, leftUntilDone := s.TotalBytes, s.MissingBytes
+	if haveSelection {
+		sizeWhenDone = selTotal
+		leftUntilDone = max(selTotal-selCompleted, 0)
+	}
+	// Derived from whichever figure applied, so an unfiltered torrent keeps the
+	// meaning it always had. HasMetadata gates it because a magnet whose info
+	// dict has not resolved has nothing missing yet and must not read as done.
+	complete := s.HasMetadata && leftUntilDone == 0
+
 	var percentDone float64
+	switch {
+	case sizeWhenDone > 0:
+		percentDone = float64(sizeWhenDone-leftUntilDone) / float64(sizeWhenDone)
+	case complete:
+		percentDone = 1
+	}
+
+	var percentComplete float64
 	if s.TotalBytes > 0 {
-		percentDone = float64(s.CompletedBytes) / float64(s.TotalBytes)
+		percentComplete = float64(s.CompletedBytes) / float64(s.TotalBytes)
 	}
 
 	errCode := 0
@@ -476,19 +513,21 @@ func (h *Handler) torrentFields(s engine.Status, files []engine.File) map[string
 		// falls back to the magnet's display name, then to the infohash.
 		"name":       s.Name,
 		"hashString": s.InfoHash.HexString(),
-		"status":     trStatus(s),
+		"status":     trStatus(s, complete),
 		"totalSize":  s.TotalBytes,
 		"haveValid":  s.CompletedBytes,
 		// downloadedEver is bytes written to disk for this torrent; the
 		// completed size is the honest approximation we can offer.
 		"downloadedEver":   s.CompletedBytes,
 		"uploadedEver":     s.UploadedBytes,
-		"leftUntilDone":    s.MissingBytes,
+		"leftUntilDone":    leftUntilDone,
+		"sizeWhenDone":     sizeWhenDone,
 		"percentDone":      percentDone,
+		"percentComplete":  percentComplete,
 		"rateDownload":     int64(s.DownloadRate),
 		"rateUpload":       int64(s.UploadRate),
-		"eta":              etaSeconds(s),
-		"isFinished":       s.HasMetadata && s.MissingBytes == 0,
+		"eta":              etaSeconds(s, leftUntilDone),
+		"isFinished":       complete,
 		"isStalled":        false,
 		"peersConnected":   s.Peers,
 		"peersSendingToUs": s.Seeders,
@@ -510,9 +549,16 @@ func (h *Handler) torrentFields(s engine.Status, files []engine.File) map[string
 	}
 }
 
-func trStatus(s engine.Status) int {
+func trStatus(s engine.Status, complete bool) int {
 	switch s.State {
 	case engine.StateDownloading:
+		// The engine calls a filtered torrent "downloading" for as long as any
+		// piece is missing, wanted or not. Once everything selected has
+		// arrived there is nothing left to download, and saying so is what
+		// puts the torrent in the state a client tests for completion.
+		if complete {
+			return trStatusSeeding
+		}
 		return trStatusDownloading
 	case engine.StateSeeding:
 		return trStatusSeeding
@@ -526,12 +572,15 @@ func trStatus(s engine.Status) int {
 }
 
 // etaSeconds reports Transmission's -1 for "unknown".
-func etaSeconds(s engine.Status) int64 {
-	eta := s.ETA()
-	if eta < 0 {
+//
+// Status.ETA divides the whole torrent's missing bytes by the rate, which
+// overstates a filtered torrent's remaining time and never reaches zero, so
+// the wanted bytes are passed in instead.
+func etaSeconds(s engine.Status, leftUntilDone int64) int64 {
+	if leftUntilDone <= 0 || s.DownloadRate <= 0 {
 		return -1
 	}
-	return int64(eta.Seconds())
+	return int64(float64(leftUntilDone) / s.DownloadRate)
 }
 
 // project returns only the requested keys. When fields is empty the whole set

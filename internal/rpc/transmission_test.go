@@ -84,6 +84,20 @@ func (f *fakeEngine) List() []engine.Status { return f.torrents }
 
 func (f *fakeEngine) Files(id int64) []engine.File { return f.files[id] }
 
+// SelectedBytes mirrors the engine's own implementation: only the files the
+// torrent wants are counted.
+func (f *fakeEngine) SelectedBytes(id int64) (completed, total int64, files int) {
+	for _, file := range f.files[id] {
+		if !file.Selected {
+			continue
+		}
+		completed += file.Completed
+		total += file.Length
+		files++
+	}
+	return completed, total, files
+}
+
 func (f *fakeEngine) Start(_ context.Context, id int64) error {
 	f.started[id] = true
 	return nil
@@ -723,4 +737,122 @@ func parseVersion(t *testing.T, v string) (major, minor int) {
 		t.Fatalf("version %q: %v", v, err)
 	}
 	return major, minor
+}
+
+// An allow-list torrent whose selected file is complete must read as finished,
+// or Sonarr never imports it: its completion tests are `leftUntilDone == 0`
+// with a stopped/seeding status, and `isFinished`. Reporting the whole
+// torrent's missing bytes fails both for as long as a deselected file exists,
+// which is forever.
+func TestFilteredTorrentReadsAsCompleteOnceSelectedFilesAre(t *testing.T) {
+	f := newFakeEngine()
+	f.torrents = []engine.Status{{
+		ID: 1, Name: "release", State: engine.StateDownloading, HasMetadata: true,
+		TotalBytes: 1000, CompletedBytes: 900, MissingBytes: 100,
+	}}
+	f.files[1] = []engine.File{
+		{Index: 0, Path: "movie.mkv", Length: 900, Completed: 900, Selected: true},
+		{Index: 1, Path: "extras.iso", Length: 100, Completed: 0, Selected: false},
+	}
+	h := newHandler(t, f, nil)
+
+	args, _ := call(t, h, "torrent-get", nil)
+	got := args["torrents"].([]any)[0].(map[string]any)
+
+	for field, want := range map[string]any{
+		"leftUntilDone":   float64(0),
+		"sizeWhenDone":    float64(900),
+		"percentDone":     float64(1),
+		"isFinished":      true,
+		"status":          float64(trStatusSeeding),
+		"percentComplete": float64(0.9),
+		"totalSize":       float64(1000),
+		"eta":             float64(-1),
+	} {
+		if got[field] != want {
+			t.Errorf("%s = %v, want %v", field, got[field], want)
+		}
+	}
+}
+
+// Sonarr's own completion expression, evaluated against what we send.
+func TestSonarrWouldCallAFilteredTorrentComplete(t *testing.T) {
+	f := newFakeEngine()
+	f.torrents = []engine.Status{{
+		ID: 1, State: engine.StateDownloading, HasMetadata: true,
+		TotalBytes: 1000, CompletedBytes: 900, MissingBytes: 100,
+	}}
+	f.files[1] = []engine.File{
+		{Index: 0, Length: 900, Completed: 900, Selected: true},
+		{Index: 1, Length: 100, Selected: false},
+	}
+	args, _ := call(t, newHandler(t, f, nil), "torrent-get", nil)
+	got := args["torrents"].([]any)[0].(map[string]any)
+
+	status := got["status"]
+	byLeft := got["leftUntilDone"] == float64(0) &&
+		(status == float64(trStatusStopped) || status == float64(trStatusSeeding) ||
+			status == float64(trStatusSeedWait))
+	byFinished := got["isFinished"] == true &&
+		status != float64(trStatusCheck) && status != float64(trStatusCheckWait)
+	if !byLeft || !byFinished {
+		t.Errorf("neither completion route fires: byLeft=%v byFinished=%v (status=%v)",
+			byLeft, byFinished, status)
+	}
+}
+
+// A partially-downloaded selection still reports honest progress, measured
+// against the selection rather than the torrent.
+func TestProgressIsMeasuredAgainstTheSelection(t *testing.T) {
+	f := newFakeEngine()
+	f.torrents = []engine.Status{{
+		ID: 1, State: engine.StateDownloading, HasMetadata: true,
+		TotalBytes: 1000, CompletedBytes: 450, MissingBytes: 550,
+		DownloadRate: 100,
+	}}
+	f.files[1] = []engine.File{
+		{Index: 0, Length: 900, Completed: 450, Selected: true},
+		{Index: 1, Length: 100, Selected: false},
+	}
+	args, _ := call(t, newHandler(t, f, nil), "torrent-get", nil)
+	got := args["torrents"].([]any)[0].(map[string]any)
+
+	if got["leftUntilDone"] != float64(450) {
+		t.Errorf("leftUntilDone = %v, want 450 (of the wanted file)", got["leftUntilDone"])
+	}
+	if got["percentDone"] != float64(0.5) {
+		t.Errorf("percentDone = %v, want 0.5", got["percentDone"])
+	}
+	if got["isFinished"] != false {
+		t.Error("isFinished should be false while the selection is incomplete")
+	}
+	// 450 wanted bytes at 100 B/s, not the 550 the whole torrent is missing.
+	if got["eta"] != float64(4) {
+		t.Errorf("eta = %v, want 4", got["eta"])
+	}
+	if got["status"] != float64(trStatusDownloading) {
+		t.Errorf("status = %v, want downloading", got["status"])
+	}
+}
+
+// Before metadata there is no selection to measure. Reporting a confident zero
+// would make a fresh magnet look complete, so the whole-torrent figures stand
+// in until the info dict resolves.
+func TestPreMetadataFallsBackToTheTorrentFigures(t *testing.T) {
+	f := newFakeEngine()
+	f.torrents = []engine.Status{{
+		ID: 1, Name: "infohash:abc", State: engine.StateInitialising,
+	}}
+	args, _ := call(t, newHandler(t, f, nil), "torrent-get", nil)
+	got := args["torrents"].([]any)[0].(map[string]any)
+
+	if got["isFinished"] != false {
+		t.Error("a torrent with no metadata must not read as finished")
+	}
+	if got["percentDone"] != float64(0) {
+		t.Errorf("percentDone = %v, want 0", got["percentDone"])
+	}
+	if got["status"] != float64(trStatusCheckWait) {
+		t.Errorf("status = %v, want check-wait", got["status"])
+	}
 }
