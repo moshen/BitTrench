@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  format:
+    name: Check formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: jdx/mise-action@v4
+      - name: gofmt
+        run: |
+          unformatted=$(mise exec -- gofmt -l cmd internal)
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt needs to run on these files:"
+            echo "$unformatted"
+            exit 1
+          fi
+      - name: biome
+        run: mise exec -- biome check internal/webui/assets/
+
+  vet:
+    name: Vet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: jdx/mise-action@v4
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: vet-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          restore-keys: vet-${{ runner.os }}-
+      - run: mise exec -- go vet ./...
+      # The Windows service code is build-tagged, so the host-GOOS vet above
+      # never compiles it.
+      - name: Vet for Windows
+        run: mise exec -- env GOOS=windows go vet ./...
+
+  deps:
+    name: Dependency budget
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: jdx/mise-action@v4
+      # mise pins CGO_ENABLED=0 and -tags=noboltdb. Without the tag,
+      # anacrolix/torrent's storage package links bbolt as its piece-completion
+      # backend; we supply our own SQLite-backed one. A build that carries any
+      # of these has lost that pinning.
+      - name: No second piece-completion backend
+        run: |
+          found=$(mise exec -- go list -deps ./... | grep -Ei "bbolt|llsqlite|zombiezen" || true)
+          if [ -n "$found" ]; then
+            echo "::error::unwanted dependencies in the build:"
+            echo "$found"
+            exit 1
+          fi
+      - name: go.mod is tidy
+        run: |
+          mise exec -- go mod tidy
+          git diff --exit-code go.mod go.sum
+
+  build-and-test:
+    name: Build and test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: jdx/mise-action@v4
+      - name: Locate the Go caches
+        id: gocache
+        shell: bash
+        run: |
+          echo "mod=$(mise exec -- go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
+          echo "build=$(mise exec -- go env GOCACHE)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ${{ steps.gocache.outputs.mod }}
+            ${{ steps.gocache.outputs.build }}
+          key: test-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          restore-keys: test-${{ runner.os }}-
+      - run: mise exec -- go build ./...
+      # The suite stands up two real WireGuard devices over loopback with an
+      # in-tunnel DNS server. It needs no network, no VPN and no privileges, so
+      # a failure here is a real one.
+      - run: mise exec -- go test ./...

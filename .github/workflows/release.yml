@@ -1,0 +1,133 @@
+name: Release
+
+# Releases are cut from CI runs, never from the push directly: workflow_run
+# fires after CI finishes and every job below is gated on it having passed, so a
+# red CI produces no release.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    name: Compute version
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      # YYYY.M.D-N, where N is the next build number for today.
+      - name: Set version
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          DATE=$(date -u +%Y.%-m.%-d)
+          MAX_BUILD=$(gh release list --limit 100 --json tagName | jq -r --arg date "$DATE" '
+            [.[] | .tagName
+             | select(test("^" + ($date | gsub("\\."; "\\.")) + "-[0-9]+$"))
+             | capture("-(?<n>[0-9]+)$").n
+             | tonumber] | max // 0
+          ')
+          BUILD=$((MAX_BUILD + 1))
+          echo "version=${DATE}-${BUILD}" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.goos }}-${{ matrix.goarch }}
+    # needs: version inherits that job's CI gate - if it is skipped, so is this.
+    needs: version
+    # Every target cross-compiles from one runner: mise pins CGO_ENABLED=0, so
+    # the SQLite driver is pure Go and no target needs a C toolchain.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            archive: tar.gz
+          - goos: linux
+            goarch: arm64
+            archive: tar.gz
+          - goos: darwin
+            goarch: arm64
+            archive: tar.gz
+          - goos: windows
+            goarch: amd64
+            archive: zip
+            ext: .exe
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - uses: jdx/mise-action@v4
+
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: release-${{ matrix.goos }}-${{ matrix.goarch }}-${{ hashFiles('go.sum') }}
+          restore-keys: release-${{ matrix.goos }}-${{ matrix.goarch }}-
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p stage
+          mise exec -- go build -trimpath -ldflags="-s -w" \
+            -o "stage/bittrench${{ matrix.ext }}" ./cmd/bittrench
+
+      - name: Stage supporting files
+        run: cp README.md config.sample.toml stage/
+
+      - name: Archive (tar.gz)
+        if: matrix.archive == 'tar.gz'
+        run: tar czf "bittrench-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz" -C stage .
+
+      - name: Archive (zip)
+        if: matrix.archive == 'zip'
+        run: |
+          cd stage
+          zip -r "../bittrench-${{ matrix.goos }}-${{ matrix.goarch }}.zip" .
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bittrench-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: bittrench-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.archive }}
+
+  release:
+    name: Create release
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ needs.version.outputs.version }}" \
+            --target "${{ github.event.workflow_run.head_sha }}" \
+            --title "${{ needs.version.outputs.version }}" \
+            --generate-notes \
+            artifacts/*
