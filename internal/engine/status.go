@@ -6,6 +6,8 @@ import (
 
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
+
+	"github.com/moshen/bittrench/internal/store"
 )
 
 // State is a torrent's coarse state, as both the Transmission RPC layer and
@@ -56,6 +58,9 @@ type Status struct {
 	// Labels are the Transmission labels, copied out of the record - Sonarr
 	// and Radarr keep their category here.
 	Labels []string
+	// SeedLimits are this torrent's own seed caps, reported as set. The zero
+	// value means the session limits apply.
+	SeedLimits store.SeedLimits
 }
 
 // Ratio is uploaded over total, or 0 when the total is unknown.
@@ -186,6 +191,7 @@ func (e *Engine) status(rec *record) Status {
 	// Cloned inside the lock: the record's slice is replaced wholesale by
 	// SetLabels, and handing a caller the live one lets it observe a write.
 	labels := slices.Clone(rec.Labels)
+	seedLimits := rec.SeedLimits
 	e.mu.RUnlock()
 
 	stats := t.Stats()
@@ -211,6 +217,7 @@ func (e *Engine) status(rec *record) Status {
 		FinishedAt:     finishedAt,
 		HasMetadata:    t.Info() != nil,
 		Labels:         labels,
+		SeedLimits:     seedLimits,
 	}
 	if s.HasMetadata {
 		s.TotalBytes = t.Length()

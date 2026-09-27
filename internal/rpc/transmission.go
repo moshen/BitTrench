@@ -29,6 +29,7 @@ import (
 
 	"github.com/moshen/bittrench/internal/config"
 	"github.com/moshen/bittrench/internal/engine"
+	"github.com/moshen/bittrench/internal/store"
 )
 
 // Transmission status codes, as the *arr clients interpret them. The whole set
@@ -44,6 +45,10 @@ const (
 	trStatusSeedWait     = 5
 	trStatusSeeding      = 6
 )
+
+// Transmission's per-torrent seed-limit modes. Only the global one is named
+// here; the engine owns the rest of the semantics.
+const seedLimitGlobal = 0
 
 // trStatLocalError is Transmission's TR_STAT_LOCAL_ERROR. A non-zero `error`
 // is what marks a torrent failed; `status` is reported as stopped alongside it.
@@ -69,6 +74,7 @@ type Torrents interface {
 	Files(id int64) []engine.File
 	SelectedBytes(id int64) (completed, total int64, files int)
 	SetLabels(ctx context.Context, id int64, labels []string) error
+	SetSeedLimits(ctx context.Context, id int64, limits store.SeedLimits) error
 	SetFileSelection(ctx context.Context, id int64, selection []bool) error
 	Start(ctx context.Context, id int64) error
 	Stop(ctx context.Context, id int64) error
@@ -352,6 +358,30 @@ type setArgs struct {
 	Labels        *[]string       `json:"labels"`
 	FilesWanted   *[]int          `json:"files-wanted"`
 	FilesUnwanted *[]int          `json:"files-unwanted"`
+
+	SeedRatioLimit *float64 `json:"seedRatioLimit"`
+	SeedRatioMode  *int     `json:"seedRatioMode"`
+	SeedIdleLimit  *int64   `json:"seedIdleLimit"`
+	SeedIdleMode   *int     `json:"seedIdleMode"`
+}
+
+// seedLimits folds the seed arguments onto a torrent's current caps, leaving
+// anything the client did not name alone.
+func (a setArgs) seedLimits(current store.SeedLimits) (store.SeedLimits, bool) {
+	next, touched := current, false
+	if a.SeedRatioLimit != nil {
+		next.RatioLimit, touched = *a.SeedRatioLimit, true
+	}
+	if a.SeedRatioMode != nil {
+		next.RatioMode, touched = *a.SeedRatioMode, true
+	}
+	if a.SeedIdleLimit != nil {
+		next.IdleLimit, touched = *a.SeedIdleLimit, true
+	}
+	if a.SeedIdleMode != nil {
+		next.IdleMode, touched = *a.SeedIdleMode, true
+	}
+	return next, touched
 }
 
 // torrentSet applies the mutable per-torrent settings a client can change.
@@ -383,6 +413,11 @@ func (h *Handler) torrentSet(ctx context.Context, raw json.RawMessage) (any, err
 		}
 		if args.Labels != nil {
 			if err := h.engine.SetLabels(ctx, s.ID, *args.Labels); err != nil {
+				return nil, err
+			}
+		}
+		if limits, touched := args.seedLimits(s.SeedLimits); touched {
+			if err := h.engine.SetSeedLimits(ctx, s.ID, limits); err != nil {
 				return nil, err
 			}
 		}
@@ -597,6 +632,19 @@ func (h *Handler) torrentFields(s engine.Status, files []engine.File) map[string
 		labels = []string{}
 	}
 
+	// A torrent following the session limit reports the session's value, not a
+	// zero: a client that reads the limit without checking the mode would
+	// otherwise see "no limit" where one applies.
+	seedRatioLimit := s.SeedLimits.RatioLimit
+	if s.SeedLimits.RatioMode == seedLimitGlobal {
+		seedRatioLimit = h.cfg.Torrent.Limits.SeedRatioLimit
+	}
+	seedIdleLimit := s.SeedLimits.IdleLimit
+	if s.SeedLimits.IdleMode == seedLimitGlobal {
+		// Transmission carries this in minutes; our config is in seconds.
+		seedIdleLimit = int64(h.cfg.Torrent.Limits.SeedTimeLimitSecs / 60)
+	}
+
 	fileList := make([]map[string]any, 0, len(files))
 	wanted := make([]int, 0, len(files))
 	priorities := make([]int, 0, len(files))
@@ -643,9 +691,16 @@ func (h *Handler) torrentFields(s engine.Status, files []engine.File) map[string
 		"secondsSeeding":   secondsSeeding,
 		"addedDate":        addedDate,
 		"uploadRatio":      s.Ratio(),
-		"seedRatioLimit":   h.cfg.Torrent.Limits.SeedRatioLimit,
-		// 0 is Transmission's TR_RATIOLIMIT_GLOBAL: follow the session limit.
-		"seedRatioMode": 0,
+		// The torrent's own caps as a client set them. Mode 0 is Transmission's
+		// TR_RATIOLIMIT_GLOBAL - follow the session limit - which is what an
+		// untouched torrent reports, and then the limit reported alongside it is
+		// the session's so a client reading only the limit still sees a usable
+		// number. Sonarr decides for itself when a download has seeded enough,
+		// from exactly these four fields.
+		"seedRatioLimit": seedRatioLimit,
+		"seedRatioMode":  s.SeedLimits.RatioMode,
+		"seedIdleLimit":  seedIdleLimit,
+		"seedIdleMode":   s.SeedLimits.IdleMode,
 		// The per-torrent directory, not the session-wide save path - once
 		// download-dir is honoured per torrent, reporting the session path
 		// for every torrent is simply a lie.

@@ -46,6 +46,10 @@ type record struct {
 	// category in them, and both filter their queue by it, so they are
 	// engine-owned state that has to survive a restart.
 	Labels []string
+	// SeedLimits are this torrent's own seed caps. The zero value follows the
+	// session limits, which is what every torrent does until a client sets
+	// otherwise through torrent-set.
+	SeedLimits store.SeedLimits
 
 	// storedFinishedAt is what the database currently holds, so the monitor
 	// writes only when the value actually changes rather than every tick.
@@ -417,6 +421,29 @@ func (e *Engine) SetLabels(ctx context.Context, id int64, labels []string) error
 	return nil
 }
 
+// SetSeedLimits records a torrent's own seed caps and persists them.
+//
+// The caps are enforced by the seed monitor, and are also reported back through
+// torrent-get: Sonarr decides for itself when a download has seeded enough and
+// reads them back to do it, so storing without reporting would be half a
+// feature.
+func (e *Engine) SetSeedLimits(ctx context.Context, id int64, limits store.SeedLimits) error {
+	rec := e.record(id)
+	if rec == nil {
+		return fmt.Errorf("no torrent with id %d", id)
+	}
+	if err := e.store.SetSeedLimits(ctx, id, limits); err != nil {
+		return err
+	}
+	e.mu.Lock()
+	rec.SeedLimits = limits
+	e.mu.Unlock()
+	slog.Info("torrent seed limits set", "id", id,
+		"ratio_limit", limits.RatioLimit, "ratio_mode", limits.RatioMode,
+		"idle_limit_minutes", limits.IdleLimit, "idle_mode", limits.IdleMode)
+	return nil
+}
+
 // SetFileSelection applies and persists a per-file selection.
 func (e *Engine) SetFileSelection(ctx context.Context, id int64, selection []bool) error {
 	rec := e.record(id)
@@ -652,8 +679,9 @@ func (e *Engine) restoreOne(ctx context.Context, s store.Torrent) error {
 		ID: s.ID, Torrent: t, Source: s.Source, SavePath: s.SavePath,
 		Paused: s.Paused, AddedAt: s.AddedAt, FinishedAt: s.FinishedAt,
 		Error: s.Error, Filtered: s.Filtered, storedFinishedAt: s.FinishedAt,
-		Labels: s.Labels,
-		ready:  make(chan struct{}),
+		Labels:     s.Labels,
+		SeedLimits: s.SeedLimits,
+		ready:      make(chan struct{}),
 	}
 	e.mu.Lock()
 	e.records[s.ID] = rec

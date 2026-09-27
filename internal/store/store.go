@@ -26,6 +26,11 @@ import (
 // (changes on removal): Sonarr and Radarr require a stable integer id and will
 // lose track of a download whose id moves.
 //
+// `seed_limits` holds the per-torrent seed caps a client sets through
+// torrent-set. A missing row means "follow the session limits", which is what
+// Transmission's mode 0 means and what every torrent added before this table
+// existed should do.
+//
 // Labels live in their own table rather than in a column on `torrents`: a
 // label is a set member, and a new table keeps every statement here a
 // CREATE ... IF NOT EXISTS, so an existing state database opens without a
@@ -56,6 +61,13 @@ CREATE TABLE IF NOT EXISTS labels (
   torrent_id  INTEGER NOT NULL REFERENCES torrents(id) ON DELETE CASCADE,
   label       TEXT    NOT NULL,
   PRIMARY KEY (torrent_id, label)
+);
+CREATE TABLE IF NOT EXISTS seed_limits (
+  torrent_id  INTEGER NOT NULL PRIMARY KEY REFERENCES torrents(id) ON DELETE CASCADE,
+  ratio_limit REAL    NOT NULL DEFAULT 0,
+  ratio_mode  INTEGER NOT NULL DEFAULT 0,
+  idle_limit  INTEGER NOT NULL DEFAULT 0,
+  idle_mode   INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS file_selection (
   torrent_id  INTEGER NOT NULL REFERENCES torrents(id) ON DELETE CASCADE,
@@ -91,6 +103,22 @@ type Torrent struct {
 	// Labels are the Transmission labels, which Sonarr and Radarr use to carry
 	// their category. Sorted, so a client polling twice sees the same order.
 	Labels []string
+	// SeedLimits are the per-torrent seed caps. The zero value is "follow the
+	// session limits".
+	SeedLimits SeedLimits
+}
+
+// SeedLimits are one torrent's seed caps, in the shape Transmission reports
+// them: a limit plus a mode saying whether to use it.
+//
+// RatioMode and IdleMode are Transmission's TR_RATIOLIMIT_*/TR_IDLELIMIT_*:
+// 0 follows the session limit, 1 uses the value here, 2 means unlimited.
+// IdleLimit is in minutes, as the protocol has it.
+type SeedLimits struct {
+	RatioLimit float64
+	RatioMode  int
+	IdleLimit  int64
+	IdleMode   int
 }
 
 // Store is the open database.
@@ -197,7 +225,41 @@ func (s *Store) List(ctx context.Context) ([]Torrent, error) {
 	if err := s.attachLabels(ctx, out); err != nil {
 		return nil, err
 	}
+	if err := s.attachSeedLimits(ctx, out); err != nil {
+		return nil, err
+	}
 	return out, nil
+}
+
+// attachSeedLimits fills in SeedLimits across a torrent list in one query.
+// Torrents with no row keep the zero value, which means "follow the session".
+func (s *Store) attachSeedLimits(ctx context.Context, torrents []Torrent) error {
+	if len(torrents) == 0 {
+		return nil
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT torrent_id, ratio_limit, ratio_mode, idle_limit, idle_mode FROM seed_limits`)
+	if err != nil {
+		return fmt.Errorf("failed to read the seed limits: %w", err)
+	}
+	defer rows.Close()
+
+	byID := make(map[int64]SeedLimits)
+	for rows.Next() {
+		var id int64
+		var l SeedLimits
+		if err := rows.Scan(&id, &l.RatioLimit, &l.RatioMode, &l.IdleLimit, &l.IdleMode); err != nil {
+			return fmt.Errorf("failed to read a seed-limit row: %w", err)
+		}
+		byID[id] = l
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for i := range torrents {
+		torrents[i].SeedLimits = byID[torrents[i].ID]
+	}
+	return nil
 }
 
 // attachLabels fills in Labels across a torrent list in one query.
@@ -329,6 +391,37 @@ func (s *Store) FileSelection(ctx context.Context, id int64) ([]bool, error) {
 		out[index] = selected != 0
 	}
 	return out, rows.Err()
+}
+
+// SetSeedLimits records a torrent's seed caps, replacing any already stored.
+func (s *Store) SetSeedLimits(ctx context.Context, id int64, l SeedLimits) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO seed_limits (torrent_id, ratio_limit, ratio_mode, idle_limit, idle_mode)
+		 VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT(torrent_id) DO UPDATE SET
+		   ratio_limit = excluded.ratio_limit, ratio_mode = excluded.ratio_mode,
+		   idle_limit  = excluded.idle_limit,  idle_mode  = excluded.idle_mode`,
+		id, l.RatioLimit, l.RatioMode, l.IdleLimit, l.IdleMode)
+	if err != nil {
+		return fmt.Errorf("failed to record the seed limits for torrent %d: %w", id, err)
+	}
+	return nil
+}
+
+// SeedLimitsFor returns a torrent's seed caps, or the zero value - "follow the
+// session limits" - when none are recorded.
+func (s *Store) SeedLimitsFor(ctx context.Context, id int64) (SeedLimits, error) {
+	var l SeedLimits
+	err := s.db.QueryRowContext(ctx,
+		`SELECT ratio_limit, ratio_mode, idle_limit, idle_mode FROM seed_limits WHERE torrent_id = ?`,
+		id).Scan(&l.RatioLimit, &l.RatioMode, &l.IdleLimit, &l.IdleMode)
+	if errors.Is(err, sql.ErrNoRows) {
+		return SeedLimits{}, nil
+	}
+	if err != nil {
+		return SeedLimits{}, fmt.Errorf("failed to read the seed limits for torrent %d: %w", id, err)
+	}
+	return l, nil
 }
 
 // SetLabels replaces a torrent's labels. Duplicates and blanks are dropped, so

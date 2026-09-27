@@ -30,6 +30,7 @@ import (
 
 	"github.com/moshen/bittrench/internal/config"
 	"github.com/moshen/bittrench/internal/engine"
+	"github.com/moshen/bittrench/internal/store"
 )
 
 // fakeEngine is the RPC layer's collaborator, so the endpoint can be tested
@@ -45,19 +46,21 @@ type fakeEngine struct {
 	down, up float64
 	// labelsSet and selectionSet record what torrent-set pushed down, so the
 	// tests assert on the engine call rather than on a round-trip.
-	labelsSet    map[int64][]string
-	selectionSet map[int64][]bool
-	setLabelsErr error
+	labelsSet     map[int64][]string
+	selectionSet  map[int64][]bool
+	seedLimitsSet map[int64]store.SeedLimits
+	setLabelsErr  error
 }
 
 func newFakeEngine() *fakeEngine {
 	return &fakeEngine{
-		files:        map[int64][]engine.File{},
-		removed:      map[int64]bool{},
-		stopped:      map[int64]bool{},
-		started:      map[int64]bool{},
-		labelsSet:    map[int64][]string{},
-		selectionSet: map[int64][]bool{},
+		files:         map[int64][]engine.File{},
+		removed:       map[int64]bool{},
+		stopped:       map[int64]bool{},
+		started:       map[int64]bool{},
+		labelsSet:     map[int64][]string{},
+		selectionSet:  map[int64][]bool{},
+		seedLimitsSet: map[int64]store.SeedLimits{},
 	}
 }
 
@@ -130,6 +133,16 @@ func (f *fakeEngine) SetLabels(_ context.Context, id int64, labels []string) err
 	for i := range f.torrents {
 		if f.torrents[i].ID == id {
 			f.torrents[i].Labels = labels
+		}
+	}
+	return nil
+}
+
+func (f *fakeEngine) SetSeedLimits(_ context.Context, id int64, limits store.SeedLimits) error {
+	f.seedLimitsSet[id] = limits
+	for i := range f.torrents {
+		if f.torrents[i].ID == id {
+			f.torrents[i].SeedLimits = limits
 		}
 	}
 	return nil
@@ -1063,5 +1076,100 @@ func TestTorrentSetWithNoIDsAppliesToAll(t *testing.T) {
 	}
 	if len(f.labelsSet) != 2 {
 		t.Errorf("labels applied to %d torrents, want 2", len(f.labelsSet))
+	}
+}
+
+// The other half of what Sonarr sends to torrent-set: its seed criteria. It
+// reads these four fields back to decide for itself when a download has seeded
+// enough, so they have to round-trip.
+func TestTorrentSetSeedLimits(t *testing.T) {
+	f := newFakeEngine()
+	f.torrents = []engine.Status{{ID: 1}}
+	h := newHandler(t, f, nil)
+
+	_, result := call(t, h, "torrent-set", map[string]any{
+		"ids":            []any{1},
+		"seedRatioLimit": 1.5,
+		"seedRatioMode":  1,
+		"seedIdleLimit":  30,
+		"seedIdleMode":   1,
+	})
+	if result != "success" {
+		t.Fatalf("torrent-set returned %q, want success", result)
+	}
+	got := f.seedLimitsSet[1]
+	want := store.SeedLimits{RatioLimit: 1.5, RatioMode: 1, IdleLimit: 30, IdleMode: 1}
+	if got != want {
+		t.Errorf("seed limits = %+v, want %+v", got, want)
+	}
+
+	args, _ := call(t, h, "torrent-get", map[string]any{
+		"fields": []string{"seedRatioLimit", "seedRatioMode", "seedIdleLimit", "seedIdleMode"},
+	})
+	reported := args["torrents"].([]any)[0].(map[string]any)
+	for field, want := range map[string]any{
+		"seedRatioLimit": float64(1.5),
+		"seedRatioMode":  float64(1),
+		"seedIdleLimit":  float64(30),
+		"seedIdleMode":   float64(1),
+	} {
+		if reported[field] != want {
+			t.Errorf("%s = %v, want %v", field, reported[field], want)
+		}
+	}
+}
+
+// A torrent nobody has set limits on follows the session, and reports the
+// session's own values: a client reading the limit without checking the mode
+// would otherwise see "no limit" where one applies.
+func TestUntouchedTorrentReportsTheSessionSeedLimits(t *testing.T) {
+	f := newFakeEngine()
+	f.torrents = []engine.Status{{ID: 1}}
+	// testConfig sets a ratio of 2.0 and a seed time of 7200s = 120 minutes.
+	args, _ := call(t, newHandler(t, f, nil), "torrent-get", nil)
+	got := args["torrents"].([]any)[0].(map[string]any)
+
+	if got["seedRatioMode"] != float64(0) || got["seedIdleMode"] != float64(0) {
+		t.Errorf("modes = %v/%v, want 0/0 (follow the session)",
+			got["seedRatioMode"], got["seedIdleMode"])
+	}
+	if got["seedRatioLimit"] != float64(2) {
+		t.Errorf("seedRatioLimit = %v, want the session's 2", got["seedRatioLimit"])
+	}
+	if got["seedIdleLimit"] != float64(120) {
+		t.Errorf("seedIdleLimit = %v, want 120 minutes", got["seedIdleLimit"])
+	}
+}
+
+// Naming one seed field must not reset the other three.
+func TestTorrentSetSeedLimitsAreFoldedOntoTheCurrentOnes(t *testing.T) {
+	f := newFakeEngine()
+	f.torrents = []engine.Status{{ID: 1, SeedLimits: store.SeedLimits{
+		RatioLimit: 3, RatioMode: 1, IdleLimit: 45, IdleMode: 1,
+	}}}
+	h := newHandler(t, f, nil)
+
+	if _, result := call(t, h, "torrent-set", map[string]any{
+		"ids": []any{1}, "seedRatioLimit": 9.0,
+	}); result != "success" {
+		t.Fatalf("torrent-set: %s", result)
+	}
+	got := f.seedLimitsSet[1]
+	want := store.SeedLimits{RatioLimit: 9, RatioMode: 1, IdleLimit: 45, IdleMode: 1}
+	if got != want {
+		t.Errorf("seed limits = %+v, want %+v - only the named field should move", got, want)
+	}
+}
+
+// A torrent-set that names no seed field must not write one.
+func TestTorrentSetWithoutSeedFieldsWritesNoLimits(t *testing.T) {
+	f := newFakeEngine()
+	f.torrents = []engine.Status{{ID: 1}}
+	if _, result := call(t, newHandler(t, f, nil), "torrent-set",
+		map[string]any{"ids": []any{1}, "labels": []string{"x"}}); result != "success" {
+		t.Fatalf("torrent-set: %s", result)
+	}
+	if _, touched := f.seedLimitsSet[1]; touched {
+		t.Error("seed limits were written by a torrent-set that did not mention them")
 	}
 }

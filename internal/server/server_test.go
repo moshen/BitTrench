@@ -13,6 +13,7 @@ import (
 	"github.com/moshen/bittrench/internal/config"
 	"github.com/moshen/bittrench/internal/engine"
 	"github.com/moshen/bittrench/internal/rpc"
+	"github.com/moshen/bittrench/internal/store"
 )
 
 // stubEngine satisfies both HTTP layers' views of the engine.
@@ -27,18 +28,20 @@ func (s *stubEngine) Status(id int64) (engine.Status, bool) {
 	}
 	return engine.Status{}, false
 }
-func (s *stubEngine) List() []engine.Status                                 { return s.torrents }
-func (s *stubEngine) Files(int64) []engine.File                             { return nil }
-func (s *stubEngine) SelectedBytes(int64) (int64, int64, int)               { return 0, 0, 0 }
-func (s *stubEngine) SetLabels(context.Context, int64, []string) error      { return nil }
-func (s *stubEngine) Peers(int64) []engine.Peer                             { return nil }
-func (s *stubEngine) AnnounceURLs(int64) []string                           { return nil }
-func (s *stubEngine) Bitfield(int64) ([]byte, int)                          { return nil, 0 }
-func (s *stubEngine) SetFileSelection(context.Context, int64, []bool) error { return nil }
-func (s *stubEngine) Start(context.Context, int64) error                    { return nil }
-func (s *stubEngine) Stop(context.Context, int64) error                     { return nil }
-func (s *stubEngine) Remove(context.Context, int64, bool) error             { return nil }
-func (s *stubEngine) SessionRates() (float64, float64)                      { return 0, 0 }
+func (s *stubEngine) List() []engine.Status                            { return s.torrents }
+func (s *stubEngine) Files(int64) []engine.File                        { return nil }
+func (s *stubEngine) SelectedBytes(int64) (int64, int64, int)          { return 0, 0, 0 }
+func (s *stubEngine) SetLabels(context.Context, int64, []string) error { return nil }
+
+func (s *stubEngine) SetSeedLimits(context.Context, int64, store.SeedLimits) error { return nil }
+func (s *stubEngine) Peers(int64) []engine.Peer                                    { return nil }
+func (s *stubEngine) AnnounceURLs(int64) []string                                  { return nil }
+func (s *stubEngine) Bitfield(int64) ([]byte, int)                                 { return nil, 0 }
+func (s *stubEngine) SetFileSelection(context.Context, int64, []bool) error        { return nil }
+func (s *stubEngine) Start(context.Context, int64) error                           { return nil }
+func (s *stubEngine) Stop(context.Context, int64) error                            { return nil }
+func (s *stubEngine) Remove(context.Context, int64, bool) error                    { return nil }
+func (s *stubEngine) SessionRates() (float64, float64)                             { return 0, 0 }
 
 func start(t *testing.T, customise func(*config.AppConfig)) (*Server, string) {
 	t.Helper()

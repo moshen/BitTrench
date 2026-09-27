@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/moshen/bittrench/internal/store"
 )
 
 func TestSeedLimitReason(t *testing.T) {
@@ -128,5 +130,62 @@ func TestETAAndRatio(t *testing.T) {
 	}
 	if got := (Status{UploadedBytes: 300}).Ratio(); got != 0 {
 		t.Errorf("Ratio with an unknown total = %v, want 0", got)
+	}
+}
+
+// A torrent's own caps override the session's, which is the whole point of
+// storing them: Sonarr pushes a per-download seed criterion and expects it to
+// be the one that applies.
+func TestEffectiveSeedLimits(t *testing.T) {
+	const sessionRatio = 2.0
+	sessionTime := 2 * time.Hour
+
+	tests := []struct {
+		name      string
+		limits    store.SeedLimits
+		wantRatio float64
+		wantTime  time.Duration
+	}{
+		{
+			name:      "an untouched torrent follows the session",
+			limits:    store.SeedLimits{},
+			wantRatio: sessionRatio,
+			wantTime:  sessionTime,
+		},
+		{
+			name:      "mode single uses the torrent's own values",
+			limits:    store.SeedLimits{RatioLimit: 0.5, RatioMode: 1, IdleLimit: 30, IdleMode: 1},
+			wantRatio: 0.5,
+			wantTime:  30 * time.Minute,
+		},
+		{
+			name:      "mode unlimited lifts the cap entirely",
+			limits:    store.SeedLimits{RatioMode: 2, IdleMode: 2},
+			wantRatio: 0,
+			wantTime:  0,
+		},
+		{
+			name:      "the two modes are independent",
+			limits:    store.SeedLimits{RatioLimit: 4, RatioMode: 1, IdleMode: 2},
+			wantRatio: 4,
+			wantTime:  0,
+		},
+		{
+			name:      "an idle limit in minutes becomes a duration",
+			limits:    store.SeedLimits{IdleLimit: 90, IdleMode: 1},
+			wantRatio: sessionRatio,
+			wantTime:  90 * time.Minute,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ratio, idle := effectiveSeedLimits(tc.limits, sessionRatio, sessionTime)
+			if ratio != tc.wantRatio {
+				t.Errorf("ratio = %v, want %v", ratio, tc.wantRatio)
+			}
+			if idle != tc.wantTime {
+				t.Errorf("idle = %v, want %v", idle, tc.wantTime)
+			}
+		})
 	}
 }

@@ -297,3 +297,43 @@ func TestDeleteRemovesLabels(t *testing.T) {
 		t.Errorf("labels survived the delete: %v", labels)
 	}
 }
+
+// A torrent with no seed-limit row follows the session, which is what every
+// torrent added before the table existed must do.
+func TestSeedLimitsDefaultToFollowingTheSession(t *testing.T) {
+	s, _ := open(t)
+	ctx := context.Background()
+	id, err := s.Put(ctx, &Torrent{InfoHash: hash(3), SavePath: "/data", AddedAt: time.Now()})
+	if err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	limits, err := s.SeedLimitsFor(ctx, id)
+	if err != nil {
+		t.Fatalf("SeedLimitsFor: %v", err)
+	}
+	if limits != (SeedLimits{}) {
+		t.Errorf("limits = %+v, want the zero value", limits)
+	}
+
+	want := SeedLimits{RatioLimit: 1.5, RatioMode: 1, IdleLimit: 30, IdleMode: 1}
+	if err := s.SetSeedLimits(ctx, id, want); err != nil {
+		t.Fatalf("SetSeedLimits: %v", err)
+	}
+	// Setting twice must update rather than fail on the primary key.
+	want.RatioLimit = 2.5
+	if err := s.SetSeedLimits(ctx, id, want); err != nil {
+		t.Fatalf("SetSeedLimits again: %v", err)
+	}
+	if got, _ := s.SeedLimitsFor(ctx, id); got != want {
+		t.Errorf("limits = %+v, want %+v", got, want)
+	}
+
+	list, err := s.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(list) != 1 || list[0].SeedLimits != want {
+		t.Errorf("List carried %+v, want %+v", list[0].SeedLimits, want)
+	}
+}
