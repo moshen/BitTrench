@@ -42,29 +42,15 @@ jobs:
           echo "version=${DATE}-${BUILD}" >> "$GITHUB_OUTPUT"
 
   build:
-    name: Build ${{ matrix.goos }}-${{ matrix.goarch }}
+    name: Build release archives
     # needs: version inherits that job's CI gate - if it is skipped, so is this.
     needs: version
-    # Every target cross-compiles from one runner: mise pins CGO_ENABLED=0, so
-    # the SQLite driver is pure Go and no target needs a C toolchain.
+    # One runner builds every target. mise pins CGO_ENABLED=0, so the SQLite
+    # driver is pure Go and no target needs a C toolchain - which is also why
+    # this is a single job rather than a matrix: a matrix would pay four runner
+    # setups, four toolchain installs and four cache restores to do the same
+    # four cross-compiles, and would need its own copy of the target list.
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - goos: linux
-            goarch: amd64
-            archive: tar.gz
-          - goos: linux
-            goarch: arm64
-            archive: tar.gz
-          - goos: darwin
-            goarch: arm64
-            archive: tar.gz
-          - goos: windows
-            goarch: amd64
-            archive: zip
-            ext: .exe
 
     steps:
       - uses: actions/checkout@v6
@@ -78,35 +64,37 @@ jobs:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: release-${{ matrix.goos }}-${{ matrix.goarch }}-${{ hashFiles('go.sum') }}
-          restore-keys: release-${{ matrix.goos }}-${{ matrix.goarch }}-
+          key: release-${{ hashFiles('go.sum') }}
+          restore-keys: release-
 
-      - name: Build
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
+      # mise run release owns the target list, the build flags and which
+      # supporting files ship, so this workflow and a local release build cannot
+      # drift apart. It lays out dist/<goos>-<goarch>/.
+      - name: Cross-compile every target
+        run: mise run release
+
+      - name: Archive each target
         run: |
-          mkdir -p stage
-          mise exec -- go build -trimpath -ldflags="-s -w" \
-            -o "stage/bittrench${{ matrix.ext }}" ./cmd/bittrench
-
-      - name: Stage supporting files
-        run: cp README.md config.sample.toml stage/
-
-      - name: Archive (tar.gz)
-        if: matrix.archive == 'tar.gz'
-        run: tar czf "bittrench-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz" -C stage .
-
-      - name: Archive (zip)
-        if: matrix.archive == 'zip'
-        run: |
-          cd stage
-          zip -r "../bittrench-${{ matrix.goos }}-${{ matrix.goarch }}.zip" .
+          mkdir -p artifacts
+          for dir in dist/*/; do
+            target=$(basename "$dir")
+            # -C so the archive holds the directory's *contents*: an operator
+            # unpacks bittrench and its files, not a wrapper directory.
+            case "$target" in
+              windows-*)
+                (cd "$dir" && zip -qr "$GITHUB_WORKSPACE/artifacts/bittrench-$target.zip" .)
+                ;;
+              *)
+                tar czf "artifacts/bittrench-$target.tar.gz" -C "$dir" .
+                ;;
+            esac
+          done
+          ls -l artifacts
 
       - uses: actions/upload-artifact@v7
         with:
-          name: bittrench-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: bittrench-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.archive }}
+          name: release-archives
+          path: artifacts/
 
   release:
     name: Create release

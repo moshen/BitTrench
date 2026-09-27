@@ -53,18 +53,26 @@ run = [
 # CGO_ENABLED=0 keeps the SQLite driver pure Go. -trimpath strips the build
 # directory out of the binary, which is also one less thing leaking a local path.
 [tasks.release]
-description = "Cross-compile stripped release binaries for every target into dist/"
+description = "Cross-compile stripped release trees for every target into dist/<goos>-<goarch>/"
 run = """
 set -e
-mkdir -p dist
+# A stale binary from a target that has since been dropped would otherwise
+# survive here and ship inside an archive.
+rm -rf dist
 for target in linux/amd64 linux/arm64 darwin/arm64 windows/amd64; do
   goos=${target%/*}
   goarch=${target#*/}
   ext=""
   [ "$goos" = "windows" ] && ext=".exe"
+  out="dist/$goos-$goarch"
   echo "building $goos/$goarch"
+  mkdir -p "$out"
   env GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="-s -w" \
-    -o "dist/bittrench-$goos-$goarch$ext" ./cmd/bittrench
+    -o "$out/bittrench$ext" ./cmd/bittrench
+  # One directory per target, holding exactly what ships: the release archive is
+  # this directory's contents, so anything an operator needs beside the binary
+  # has to be staged here rather than added on by the workflow.
+  cp README.md config.sample.toml "$out/"
 done
-ls -l dist
+find dist -type f
 """

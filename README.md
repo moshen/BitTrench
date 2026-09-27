@@ -22,7 +22,7 @@ The toolchain is pinned with mise, which also fixes `CGO_ENABLED=0` and
 mise run build     # every package, for this host
 mise run test      # the full suite, ~10s, no network or VPN
 mise run check     # everything CI checks
-mise run release   # stripped binaries for every target, into dist/
+mise run release   # stripped binaries for every target, into dist/<goos>-<goarch>/
 mise exec -- go run ./cmd/bittrench -config /path/to/config.toml
 ```
 
