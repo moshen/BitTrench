@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -18,6 +19,19 @@ func TestSearchPaths(t *testing.T) {
 	home := func(dir string) func() (string, error) {
 		return func() (string, error) { return dir, nil }
 	}
+	// searchPaths parameterises which entries appear, not how they are spelled:
+	// the spelling comes from the host's filepath either way. So every want is
+	// built with filepath.Join, and the one value that has to satisfy
+	// filepath.IsAbs is spelled for the host - "/xdg" is not absolute on
+	// Windows, which would send that case down the home-directory branch.
+	absDir := func(name string) string {
+		if runtime.GOOS == "windows" {
+			return filepath.Join(`C:\`, name)
+		}
+		return "/" + name
+	}
+	opHome := absDir("home/op")
+	xdgHome := absDir("xdg")
 
 	tests := []struct {
 		name string
@@ -29,24 +43,24 @@ func TestSearchPaths(t *testing.T) {
 		{
 			name: "linux falls back to ~/.config",
 			goos: "linux",
-			home: home("/home/op"),
-			want: []string{"config.toml", "/home/op/.config/bittrench/config.toml"},
+			home: home(opHome),
+			want: []string{FileName, filepath.Join(opHome, ".config", appDir, FileName)},
 		},
 		{
 			name: "XDG_CONFIG_HOME overrides the fallback",
 			goos: "linux",
-			env:  map[string]string{"XDG_CONFIG_HOME": "/xdg"},
-			home: home("/home/op"),
-			want: []string{"config.toml", filepath.Join("/xdg", "bittrench", "config.toml")},
+			env:  map[string]string{"XDG_CONFIG_HOME": xdgHome},
+			home: home(opHome),
+			want: []string{FileName, filepath.Join(xdgHome, appDir, FileName)},
 		},
 		{
 			// XDG says a relative value is invalid. It would otherwise resolve
 			// against the working directory and shadow the entry above it.
 			name: "a relative XDG_CONFIG_HOME is ignored",
 			goos: "linux",
-			env:  map[string]string{"XDG_CONFIG_HOME": "relative/dir"},
-			home: home("/home/op"),
-			want: []string{"config.toml", "/home/op/.config/bittrench/config.toml"},
+			env:  map[string]string{"XDG_CONFIG_HOME": filepath.Join("relative", "dir")},
+			home: home(opHome),
+			want: []string{FileName, filepath.Join(opHome, ".config", appDir, FileName)},
 		},
 		{
 			name: "windows gets the XDG location too, then ProgramData",
