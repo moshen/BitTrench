@@ -41,6 +41,49 @@ version = "latest"
 `mise ls-remote github:moshen/BitTrench` lists the published versions, and a
 specific one installs with `mise use -g "github:moshen/BitTrench@<version>"`.
 
+### scoop, on Windows
+
+[moshen/BitTrench-scoop](https://github.com/moshen/BitTrench-scoop) is a
+[Scoop](https://scoop.sh) bucket holding a manifest for the windows-amd64
+archive:
+
+```powershell
+scoop bucket add bittrench https://github.com/moshen/BitTrench-scoop
+scoop install bittrench
+```
+
+Then `scoop update bittrench` for later versions.
+
+Put your `config.toml` under `%USERPROFILE%\.config\bittrench\` or
+`C:\ProgramData\bittrench\` for a scoop install. `scoop prefix bittrench` prints
+the install directory, if you want the `config.sample.toml` that shipped in the
+archive.
+
+## Configuration
+
+See [config.sample.toml](config.sample.toml) for a full configuration
+reference.
+
+The `-config` command line flag will prevent searching for a user config file.
+Without the flag, the first of these that is found will be used:
+
+1. `./config.toml`
+2. `$XDG_CONFIG_HOME/bittrench/config.toml`, or `~/.config/bittrench/config.toml`
+3. `%ProgramData%\bittrench\config.toml`, on Windows only
+
+The XDG location works on every platform, Windows included.
+
+Installing the Windows service registers whichever path was resolved when you
+run `install`, and the service runs as `LocalSystem` rather than as you. Pass
+`-config` with the `%ProgramData%` path for a machine-wide service instead of
+letting it pick up the copy in your own profile. Or, create a configuration in
+`%ProgramData%` before installing the service. `install` prints the path it
+registered.
+
+The state database and the log directory default to sitting **beside the cofig
+file that was found**. Set `state_db_path` and `log_dir` to put them somewhere
+else.
+
 ## Build and run
 
 The toolchain is pinned with mise, which also fixes `CGO_ENABLED=0` and
@@ -60,32 +103,7 @@ Copy `config.sample.toml` to `config.toml` and fill in the `[wireguard]`
 section from your provider's configuration. `wireguard.dns` is **required**:
 without it nothing can be resolved inside the tunnel.
 
-### Where the configuration lives
-
-`-config` wins whenever it is given, and a missing file behind it is an error
-rather than a reason to load a different one. Without the flag, the first of
-these that exists is used:
-
-1. `./config.toml`
-2. `$XDG_CONFIG_HOME/bittrench/config.toml`, or `~/.config/bittrench/config.toml`
-3. `%ProgramData%\bittrench\config.toml`, on Windows only
-
-The XDG location works on every platform, Windows included, so there is one
-answer to where a config goes wherever the daemon runs. The machine-wide Windows
-location comes last so a per-user file overrides it. If none exists, the error
-names every path it tried.
-
-The state database and the log directory default to sitting **beside the file
-that was chosen**, so its location also decides where the daemon keeps its
-state. Set `state_db_path` and `log_dir` to put them somewhere else.
-
-Installing the Windows service is the one case to be deliberate about: it
-registers whichever path was resolved when you ran `install`, and the service
-runs as LocalSystem rather than as you. Pass `-config` with the `%ProgramData%`
-path for a machine-wide service instead of letting it pick up the copy in your
-own profile. `install` prints the path it registered.
-
-### Prove the tunnel works with your config
+### Test the tunnel works with your config
 
 ```sh
 mise exec -- go run ./cmd/bittrench -config config.toml dial-through
@@ -154,12 +172,6 @@ removes and recreates the service, which means:
   has replaced a registration.
 - A service that was running is stopped, recreated and started again. One that
   was stopped stays stopped unless you pass `-start-now`.
-
-There is no `-name` on `install`: one machine, one daemon. Two services sharing
-this binary would share its configuration, and with it one state database and one
-API port. If another service on the machine already runs this executable,
-`install` refuses and tells you which one and how to remove it. `uninstall` still
-takes `-name`, so a stray from an older version can be cleaned up.
 
 ## Layout
 
