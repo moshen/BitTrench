@@ -286,11 +286,6 @@ func run(ctx context.Context, configPath string) error {
 		slog.Error("some torrents could not be restored", "error", err)
 	}
 
-	if !cfg.Torrent.DisableUPnPPortForward {
-		slog.Warn("disable_upnp_port_forward = false has no effect: " +
-			"UPnP would have to reach the provider's gateway through the tunnel, which is not supported")
-	}
-
 	if s.srv != nil {
 		go s.srv.Serve()
 		slog.Info("API and web UI listening", "addr", s.srv.Addr(),

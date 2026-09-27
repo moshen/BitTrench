@@ -157,8 +157,7 @@ func clientConfig(cfg *config.AppConfig, tnet Net) (*torrent.ClientConfig, error
 	cc.NoDHT = true
 	// UPnP would have to speak to the provider's gateway through the tunnel,
 	// which anacrolix/upnp will not do, and the id it announces is built from
-	// this module's path. Off, always - `disable_upnp_port_forward` stays the
-	// inert compatibility key it has always been.
+	// this module's path. Off, always, with no config key to turn it back on.
 	cc.NoDefaultPortForwarding = true
 
 	// Local Service Discovery multicasts infohashes on the *host* LAN, which

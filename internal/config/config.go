@@ -70,7 +70,6 @@ type TorrentConfig struct {
 	SavePath               string `toml:"save_path"`
 	FastResume             bool   `toml:"fast_resume"`
 	EnableDHT              bool   `toml:"enable_dht"`
-	DisableUPnPPortForward bool   `toml:"disable_upnp_port_forward"`
 	PeerConnectTimeoutSecs uint32 `toml:"peer_connect_timeout_secs"`
 	// StateDBPath overrides the SQLite state database location. Defaults to
 	// `state.db` in the same directory as the config file.
@@ -140,7 +139,6 @@ func Defaults() AppConfig {
 		Torrent: TorrentConfig{
 			FastResume:             true,
 			EnableDHT:              true,
-			DisableUPnPPortForward: true,
 			PeerConnectTimeoutSecs: 10,
 			DownloadQueueSize:      5,
 			ListenPort:             6881,

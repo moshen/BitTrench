@@ -61,11 +61,6 @@ download_queue_size = 5
 # rehashes every torrent.
 fast_resume = true
 enable_dht = true
-# Has no effect, and is kept only so existing configuration files keep loading.
-# Port forwarding would have to reach your provider's gateway from inside the
-# tunnel, which is not supported. Setting it to `false` logs a warning at
-# startup rather than silently doing nothing.
-disable_upnp_port_forward = true
 peer_connect_timeout_secs = 10
 # Optional override for the SQLite state database location. Defaults to
 # `state.db` in the same directory as this config file.

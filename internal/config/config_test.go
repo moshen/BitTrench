@@ -64,7 +64,7 @@ func TestDefaultsSurviveAnAbsentKey(t *testing.T) {
 	if got := cfg.Torrent.Limits.UploadRateLimitKbps; got != 500 {
 		t.Errorf("upload_rate_limit_kbps default = %v, want 500", got)
 	}
-	if !cfg.Torrent.FastResume || !cfg.Torrent.EnableDHT || !cfg.Torrent.DisableUPnPPortForward {
+	if !cfg.Torrent.FastResume || !cfg.Torrent.EnableDHT {
 		t.Errorf("boolean defaults should be true, got %+v", cfg.Torrent)
 	}
 	if got := cfg.Torrent.PeerConnectTimeoutSecs; got != 10 {
