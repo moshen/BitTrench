@@ -41,6 +41,68 @@ version = "latest"
 `mise ls-remote github:moshen/BitTrench` lists the published versions, and a
 specific one installs with `mise use -g "github:moshen/BitTrench@<version>"`.
 
+### docker
+
+Every release publishes two images to the GitHub container registry, one per
+linux architecture, joined under a multi-arch tag - so a plain pull resolves to
+the right one:
+
+```sh
+docker pull ghcr.io/moshen/bittrench:latest             # amd64 or arm64, whichever fits
+docker pull ghcr.io/moshen/bittrench:2026.9.27-1        # a specific version
+docker pull ghcr.io/moshen/bittrench:2026.9.27-1-arm64  # pinned to one architecture
+```
+
+The images hold the same binaries the release archives hold. They need **no
+privileges and no `/dev/net/tun`**: the WireGuard device is entirely in user
+space, so there is no `--cap-add NET_ADMIN` and no `--privileged` here.
+
+```sh
+mkdir -p config downloads
+cp config.sample.toml config/config.toml    # fill in [wireguard]; save_path is
+                                           # the image's, see below
+
+docker run -d --name bittrench \
+  --user "$(id -u):$(id -g)" \
+  -p 127.0.0.1:6800:6800 \
+  -v "$PWD/config:/config" \
+  -v "$PWD/downloads:/downloads" \
+  ghcr.io/moshen/bittrench:latest
+```
+
+- **`/config` is the working directory**, which is where `./config.toml` - the
+  first entry in the search path above - resolves. So a config mounted there
+  needs no `-config` flag, and `state.db` lands beside it in the same mount,
+  which therefore has to be writable.
+- **Downloads go to `/downloads`**, whatever `save_path` in the mounted config
+  says - the image overrides it, so the directory to mount is the same for
+  everyone. A config that sets no `save_path` at all works in here.
+- **Logs go to stderr only**, so `docker logs -f bittrench` is the whole of
+  them; the rolling files are off. `-e BITTRENCH_LOGGING_TO_FILE=1` brings them
+  back, under `/config/logs`.
+- **`--user` is worth passing.** The image does not fix a uid, so without it the
+  daemon runs as root and everything it writes into your mounts is root-owned.
+- **6800 is always the port to publish**, for the same reason as the download
+  path - see [the override table](#overriding-from-the-environment). Publishing
+  to `127.0.0.1` as above keeps it off the LAN; if you publish it more widely,
+  set `[api] username` and `password`, which the daemon warns about at startup.
+
+Subcommands work as arguments to the container, so a one-shot download is:
+
+```sh
+docker run --rm -v "$PWD/config:/config" -v "$PWD/downloads:/downloads" \
+  ghcr.io/moshen/bittrench:latest get 'magnet:?xt=urn:btih:...'
+```
+
+There is no shell in the image. `config.sample.toml` ships inside it anyway, so
+the version that matches the binary can be lifted out:
+
+```sh
+id=$(docker create ghcr.io/moshen/bittrench:latest)
+docker cp "$id:/usr/share/bittrench/config.sample.toml" .
+docker rm "$id"
+```
+
 ### scoop, on Windows
 
 [moshen/BitTrench-scoop](https://github.com/moshen/BitTrench-scoop) is a
@@ -119,10 +181,16 @@ mise run build     # every package, for this host
 mise run test      # the full suite, ~10s, no network or VPN
 mise run check     # everything CI checks
 mise run release   # stripped binaries for every target, into dist/<goos>-<goarch>/
+mise run docker    # the container images, from what release built
 mise exec -- go run ./cmd/bittrench -config /path/to/config.toml
 ```
 
 `release` can cross-compile every target from one machine with no C toolchain.
+
+`mise run docker` packages the `dist/linux-*` trees `release` just built into
+container images - this host's architecture by default, both with `PUSH=1`,
+which is what the release workflow runs. It compiles nothing itself, so the
+image and the archive for a version carry the same bytes.
 
 Copy `config.sample.toml` to `config.toml` and fill in the `[wireguard]`
 section from your provider's configuration. `wireguard.dns` is **required**:

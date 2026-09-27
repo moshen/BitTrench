@@ -1,0 +1,5 @@
+# The image copies one binary and one sample config out of dist/, so the context
+# is that tree and nothing else. Keeping the sources out also stops an unrelated
+# edit from invalidating the image's layer cache.
+*
+!dist

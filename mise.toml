@@ -76,3 +76,65 @@ for target in linux/amd64 linux/arm64 darwin/arm64 windows/amd64; do
 done
 find dist -type f
 """
+
+# The container image. It packages what `mise run release` built rather than
+# compiling anything itself, so the binary in the image is the binary in the
+# archive - see the Dockerfile. Owning the tags and the architecture list here
+# is what keeps the release workflow and a local image build from drifting.
+[tasks.docker]
+description = "Build the amd64 and arm64 container images from dist/linux-* (IMAGE, VERSION, PUSH=1)"
+run = """
+set -e
+image=${IMAGE:-ghcr.io/moshen/bittrench}
+version=${VERSION:-dev}
+push=${PUSH:-0}
+
+# One image per released linux architecture, each tagged on its own so a
+# deployment can pin an arch, and joined below into a multi-arch tag so a plain
+# pull still resolves to the right one.
+if [ "$push" = "1" ]; then
+  output=--push
+  archs=${ARCHS:-amd64 arm64}
+else
+  # A local build loads into the host's docker, which holds one architecture per
+  # tag and no manifest list at all - so it builds this host's architecture only.
+  output=--load
+  case "$(uname -m)" in
+    aarch64|arm64) archs=${ARCHS:-arm64} ;;
+    *) archs=${ARCHS:-amd64} ;;
+  esac
+fi
+
+for arch in $archs; do
+  if [ ! -x "dist/linux-$arch/bittrench" ]; then
+    echo "dist/linux-$arch/bittrench is missing; run 'mise run release' first" >&2
+    exit 1
+  fi
+done
+
+tags=""
+for arch in $archs; do
+  echo "building $image:$version-$arch"
+  docker buildx build "$output" \
+    --platform "linux/$arch" \
+    --build-arg "VERSION=$version" \
+    -t "$image:$version-$arch" \
+    .
+  tags="$tags $image:$version-$arch"
+done
+
+if [ "$push" != "1" ]; then
+  echo "built$tags - set PUSH=1 to publish both architectures and the manifest"
+  exit 0
+fi
+
+# imagetools rather than a third build: it assembles the manifest list from the
+# two images just pushed, so :version resolves to exactly those digests and
+# nothing is built twice. :latest moves only for a real version.
+if [ "$version" = "dev" ]; then
+  docker buildx imagetools create -t "$image:$version" $tags
+else
+  docker buildx imagetools create -t "$image:$version" -t "$image:latest" $tags
+fi
+docker buildx imagetools inspect "$image:$version"
+"""

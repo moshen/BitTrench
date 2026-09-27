@@ -181,6 +181,66 @@ jobs:
             --generate-notes \
             artifacts/*
 
+  # One image per linux architecture, plus a multi-arch tag over the two, on
+  # GHCR. The images package the binaries the release already published rather
+  # than compiling again: the archive is downloaded and unpacked back into
+  # dist/<goos>-<goarch>/, which is the layout mise run docker and the Dockerfile
+  # expect, so the bytes an operator pulls are the bytes an operator downloads.
+  # Nothing here runs a foreign binary, so both architectures build on this
+  # amd64 runner with no emulation.
+  docker:
+    name: Push the container images
+    needs: [version, release]
+    runs-on: ubuntu-latest
+    # A job-level block replaces the workflow's, so contents has to be restated
+    # for the checkout; packages:write is what pushes to GHCR.
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-archives
+          path: artifacts
+
+      # The archive holds the release directory's *contents*, so unpacking it
+      # into dist/linux-<arch>/ rebuilds exactly the tree mise run release lays
+      # out - binary, sample config and README together.
+      - name: Restage the published linux builds
+        run: |
+          set -euo pipefail
+          for arch in amd64 arm64; do
+            mkdir -p "dist/linux-$arch"
+            tar xzf "artifacts/bittrench-linux-$arch.tar.gz" -C "dist/linux-$arch"
+          done
+          find dist -type f
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: jdx/mise-action@v4
+
+      # mise run docker owns the tags and the architecture list for the same
+      # reason mise run release owns the target list.
+      - name: Build and push both architectures
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          PUSH: "1"
+        run: |
+          # GHCR rejects an upper-case path, and this repository has one.
+          IMAGE=ghcr.io/$(echo "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')
+          echo "pushing $IMAGE:$VERSION"
+          IMAGE="$IMAGE" mise run docker
+
   # The bucket lives in its own repo so scoop users can add it without cloning
   # BitTrench, which means pushing across a repository boundary: GITHUB_TOKEN is
   # scoped to this repo only, hence a deploy key held as a secret here whose
