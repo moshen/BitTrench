@@ -13,6 +13,34 @@ Radarr can drive it, along with a web UI.
 One host UDP socket (the WireGuard connection) is the only network connection
 the host machine sees, alongside the localhost RPC/UI listener.
 
+## Install
+
+Download a release archive from the releases page and put `bittrench` on your
+PATH. Or:
+
+### mise
+
+Every push to `main` that passes CI publishes an archive per platform. Install
+the latest with [mise](https://mise.jdx.dev) through the `github:` backend:
+
+```sh
+mise use -g "github:moshen/BitTrench"
+```
+
+That picks the archive matching your OS and architecture, and puts the extracted
+`bittrench` on your PATH. `config.sample.toml` is in the same archive, next to
+the binary.
+
+To pin it from a `mise.toml` instead:
+
+```toml
+[tools."github:moshen/BitTrench"]
+version = "latest"
+```
+
+`mise ls-remote github:moshen/BitTrench` lists the published versions, and a
+specific one installs with `mise use -g "github:moshen/BitTrench@<version>"`.
+
 ## Build and run
 
 The toolchain is pinned with mise, which also fixes `CGO_ENABLED=0` and
