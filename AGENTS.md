@@ -109,4 +109,11 @@ Breaking any of these is a bug even when the tests pass.
    `Torrent.BytesMissing` counts every incomplete piece whether it is wanted or
    not, so `Status.MissingBytes` never reaches zero once any file is deselected
    - by `allowed_extensions` or by hand. Anything waiting for a download to
-   finish waits on `Engine.SelectedBytes`.
+   finish waits on `Engine.SelectedBytes`, and the Transmission fields measured
+   against the selection (`leftUntilDone`, `sizeWhenDone`, `percentDone`,
+   `isFinished`) are derived from it.
+10. **Held and paused are different things that look the same.** The download
+    queue holds a torrent exactly as a pause does - nothing is wanted, per
+    invariant 5 - but `Queued` is tracked separately from `Paused`, because only
+    the user clears `Paused` while the queue clears `Queued` itself. Anything
+    asking "should this be running" has to read both.

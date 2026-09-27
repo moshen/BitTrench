@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strconv"
 	"time"
 
@@ -75,6 +76,7 @@ type Torrents interface {
 	SelectedBytes(id int64) (completed, total int64, files int)
 	SetLabels(ctx context.Context, id int64, labels []string) error
 	SetSeedLimits(ctx context.Context, id int64, limits store.SeedLimits) error
+	MoveInQueue(ctx context.Context, id int64, move engine.Move) error
 	SetFileSelection(ctx context.Context, id int64, selection []bool) error
 	Start(ctx context.Context, id int64) error
 	Stop(ctx context.Context, id int64) error
@@ -172,6 +174,14 @@ func (h *Handler) dispatch(ctx context.Context, req request) (any, error) {
 		return h.torrentGet(req.Arguments)
 	case "torrent-set":
 		return h.torrentSet(ctx, req.Arguments)
+	case "queue-move-top":
+		return h.queueMove(ctx, req.Arguments, engine.MoveTop)
+	case "queue-move-up":
+		return h.queueMove(ctx, req.Arguments, engine.MoveUp)
+	case "queue-move-down":
+		return h.queueMove(ctx, req.Arguments, engine.MoveDown)
+	case "queue-move-bottom":
+		return h.queueMove(ctx, req.Arguments, engine.MoveBottom)
 	case "torrent-remove":
 		return h.torrentRemove(ctx, req.Arguments)
 	case "torrent-stop":
@@ -244,6 +254,10 @@ func (h *Handler) sessionGet() map[string]any {
 		// seconds.
 		"idle-seeding-limit":         limits.SeedTimeLimitSecs / 60,
 		"idle-seeding-limit-enabled": limits.SeedTimeLimitSecs > 0,
+		// A client that can reorder the queue reads these to know it exists and
+		// how deep it is.
+		"download-queue-size":    h.cfg.Torrent.DownloadQueueSize,
+		"download-queue-enabled": h.cfg.Torrent.DownloadQueueSize > 0,
 	}
 }
 
@@ -483,6 +497,51 @@ func (h *Handler) applyFileWishes(ctx context.Context, id int64, args setArgs) e
 	apply(args.FilesWanted, true)
 
 	return h.engine.SetFileSelection(ctx, id, selection)
+}
+
+// queueMove repositions torrents in the download queue.
+//
+// Sonarr calls queue-move-top after adding, whenever its Recent or Older
+// priority is set to First. It used to answer "method not implemented", which
+// its ProcessRequest raises as a TransmissionException - so the torrent was
+// added and the add was then reported as having failed.
+//
+// Moves are applied in queue order rather than the order the ids arrived in, so
+// moving a set of torrents to the top keeps their relative order instead of
+// reversing it.
+func (h *Handler) queueMove(ctx context.Context, raw json.RawMessage, move engine.Move) (any, error) {
+	var args getArgs
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &args); err != nil {
+			return nil, fmt.Errorf("invalid arguments: %w", err)
+		}
+	}
+	ids, filtered, err := parseIDs(args.IDs)
+	if err != nil {
+		return nil, err
+	}
+
+	selected := make([]engine.Status, 0, len(ids))
+	for _, s := range h.engine.List() {
+		if filtered && !ids[s.ID] {
+			continue
+		}
+		selected = append(selected, s)
+	}
+	// To the top or up, the frontmost torrent moves first; to the bottom or
+	// down, the rearmost does. Either way the set arrives in its original order.
+	sort.SliceStable(selected, func(i, j int) bool {
+		if move == engine.MoveTop || move == engine.MoveUp {
+			return selected[i].QueuePosition < selected[j].QueuePosition
+		}
+		return selected[i].QueuePosition > selected[j].QueuePosition
+	})
+	for _, s := range selected {
+		if err := h.engine.MoveInQueue(ctx, s.ID, move); err != nil {
+			return nil, err
+		}
+	}
+	return nil, nil
 }
 
 type removeArgs struct {
@@ -749,10 +808,11 @@ func (h *Handler) torrentFields(s engine.Status, files []engine.File) map[string
 		"priorities":  priorities,
 		// Both spellings: file-count is Transmission's, fileCount is Vuze's,
 		// and Sonarr and Radarr ask for both without knowing which they will get.
-		"file-count":  len(files),
-		"fileCount":   len(files),
-		"error":       errCode,
-		"errorString": s.Error,
+		"file-count":    len(files),
+		"fileCount":     len(files),
+		"error":         errCode,
+		"errorString":   s.Error,
+		"queuePosition": s.QueuePosition,
 		// Always an array, never null: a client that filters on it should see
 		// "no labels", and Transmission itself sends [].
 		"labels": labels,
@@ -761,6 +821,8 @@ func (h *Handler) torrentFields(s engine.Status, files []engine.File) map[string
 
 func trStatus(s engine.Status, complete bool) int {
 	switch s.State {
+	case engine.StateQueued:
+		return trStatusDownloadWait
 	case engine.StateDownloading:
 		// The engine calls a filtered torrent "downloading" for as long as any
 		// piece is missing, wanted or not. Once everything selected has

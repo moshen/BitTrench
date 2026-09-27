@@ -54,6 +54,14 @@ type fakeEngine struct {
 	// what makes Transmission answer torrent-duplicate.
 	addDuplicate bool
 	duplicateID  int64
+	// moves records queue-move calls in the order they were made, which is the
+	// part that matters when a move covers several torrents.
+	moves []queueMoveCall
+}
+
+type queueMoveCall struct {
+	ID   int64
+	Move engine.Move
 }
 
 func newFakeEngine() *fakeEngine {
@@ -142,6 +150,11 @@ func (f *fakeEngine) SetLabels(_ context.Context, id int64, labels []string) err
 			f.torrents[i].Labels = labels
 		}
 	}
+	return nil
+}
+
+func (f *fakeEngine) MoveInQueue(_ context.Context, id int64, move engine.Move) error {
+	f.moves = append(f.moves, queueMoveCall{ID: id, Move: move})
 	return nil
 }
 
@@ -1277,5 +1290,111 @@ func TestSecondsDownloading(t *testing.T) {
 	}
 	if got := list[1].(map[string]any)["secondsDownloading"].(float64); got < 110 || got > 130 {
 		t.Errorf("a finished torrent reported %v, want about 120", got)
+	}
+}
+
+// Sonarr calls queue-move-top after adding whenever its priority is set to
+// First. It used to answer "method not implemented", which its ProcessRequest
+// raises as a TransmissionException - so the torrent was added and the add was
+// then reported as failed.
+func TestQueueMoveMethods(t *testing.T) {
+	for method, want := range map[string]engine.Move{
+		"queue-move-top":    engine.MoveTop,
+		"queue-move-up":     engine.MoveUp,
+		"queue-move-down":   engine.MoveDown,
+		"queue-move-bottom": engine.MoveBottom,
+	} {
+		t.Run(method, func(t *testing.T) {
+			f := newFakeEngine()
+			f.torrents = []engine.Status{{ID: 1}}
+			_, result := call(t, newHandler(t, f, nil), method, map[string]any{"ids": []any{1}})
+			if result != "success" {
+				t.Fatalf("%s returned %q, want success", method, result)
+			}
+			if len(f.moves) != 1 || f.moves[0].ID != 1 || f.moves[0].Move != want {
+				t.Errorf("%s produced %+v, want one %v on torrent 1", method, f.moves, want)
+			}
+		})
+	}
+}
+
+// Moving several torrents to the top must keep their relative order, which
+// means moving the frontmost first - the naive order reverses the set.
+func TestQueueMoveKeepsRelativeOrder(t *testing.T) {
+	tests := []struct {
+		name string
+		move string
+		want []int64
+	}{
+		{name: "to the top, frontmost first", move: "queue-move-top", want: []int64{1, 2, 3}},
+		{name: "to the bottom, rearmost first", move: "queue-move-bottom", want: []int64{3, 2, 1}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeEngine()
+			f.torrents = []engine.Status{
+				{ID: 3, QueuePosition: 2},
+				{ID: 1, QueuePosition: 0},
+				{ID: 2, QueuePosition: 1},
+			}
+			if _, result := call(t, newHandler(t, f, nil), tc.move,
+				map[string]any{"ids": []any{1, 2, 3}}); result != "success" {
+				t.Fatalf("%s: %s", tc.move, result)
+			}
+			got := make([]int64, 0, len(f.moves))
+			for _, m := range f.moves {
+				got = append(got, m.ID)
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("moved %v, want %v", got, tc.want)
+			}
+			for i := range tc.want {
+				if got[i] != tc.want[i] {
+					t.Errorf("moved in order %v, want %v", got, tc.want)
+					break
+				}
+			}
+		})
+	}
+}
+
+// A queued torrent reports Transmission's download-wait status and its place in
+// the queue, which is what a client renders as "Queued (3 of 7)".
+func TestQueuedTorrentReportsWaitStatusAndPosition(t *testing.T) {
+	f := newFakeEngine()
+	f.torrents = []engine.Status{
+		{ID: 1, State: engine.StateQueued, Queued: true, QueuePosition: 2, HasMetadata: true},
+	}
+	args, _ := call(t, newHandler(t, f, nil), "torrent-get",
+		map[string]any{"fields": []string{"status", "queuePosition"}})
+	got := args["torrents"].([]any)[0].(map[string]any)
+
+	if got["status"] != float64(trStatusDownloadWait) {
+		t.Errorf("status = %v, want %d (download-wait)", got["status"], trStatusDownloadWait)
+	}
+	if got["queuePosition"] != float64(2) {
+		t.Errorf("queuePosition = %v, want 2", got["queuePosition"])
+	}
+}
+
+// A client that can reorder the queue reads session-get to know it exists.
+func TestSessionGetAdvertisesTheQueue(t *testing.T) {
+	h := newHandler(t, newFakeEngine(), func(cfg *config.AppConfig) {
+		cfg.Torrent.DownloadQueueSize = 3
+	})
+	args, _ := call(t, h, "session-get", nil)
+	if args["download-queue-size"] != float64(3) {
+		t.Errorf("download-queue-size = %v, want 3", args["download-queue-size"])
+	}
+	if args["download-queue-enabled"] != true {
+		t.Errorf("download-queue-enabled = %v, want true", args["download-queue-enabled"])
+	}
+
+	off := newHandler(t, newFakeEngine(), func(cfg *config.AppConfig) {
+		cfg.Torrent.DownloadQueueSize = 0
+	})
+	args, _ = call(t, off, "session-get", nil)
+	if args["download-queue-enabled"] != false {
+		t.Errorf("a zero queue reported enabled = %v, want false", args["download-queue-enabled"])
 	}
 }

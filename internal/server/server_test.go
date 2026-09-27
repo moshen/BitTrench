@@ -36,6 +36,7 @@ func (s *stubEngine) SelectedBytes(int64) (int64, int64, int)          { return 
 func (s *stubEngine) SetLabels(context.Context, int64, []string) error { return nil }
 
 func (s *stubEngine) SetSeedLimits(context.Context, int64, store.SeedLimits) error { return nil }
+func (s *stubEngine) MoveInQueue(context.Context, int64, engine.Move) error        { return nil }
 func (s *stubEngine) Peers(int64) []engine.Peer                                    { return nil }
 func (s *stubEngine) AnnounceURLs(int64) []string                                  { return nil }
 func (s *stubEngine) Bitfield(int64) ([]byte, int)                                 { return nil, 0 }

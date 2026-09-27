@@ -62,6 +62,19 @@ To run the daemon itself with no RPC endpoint and no web UI, set
 `enabled = false` in the `[api]` table. That leaves the WireGuard bind as the
 only host socket the process holds.
 
+### The download queue
+
+`[torrent] download_queue_size` (default 5) caps how many torrents download at
+once; the rest wait their turn and report Transmission's download-wait status,
+which clients show as "Queued". Finished torrents seed without holding a slot,
+and a torrent stopped by hand does not hold one either. Set it to `0` to
+download everything at once.
+
+The order is persisted, so it survives a restart, and a client can reorder it
+with `queue-move-top`, `queue-move-up`, `queue-move-down` and
+`queue-move-bottom` - which is how Sonarr promotes a download whose priority is
+set to First.
+
 ### Windows service
 
 ```
