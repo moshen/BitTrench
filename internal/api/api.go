@@ -30,7 +30,7 @@ const maxUploadBytes = 8 << 20
 
 // Torrents is the slice of the engine this API needs.
 type Torrents interface {
-	Add(ctx context.Context, req engine.AddRequest) (int64, error)
+	Add(ctx context.Context, req engine.AddRequest) (id int64, duplicate bool, err error)
 	Status(id int64) (engine.Status, bool)
 	List() []engine.Status
 	Files(id int64) []engine.File
@@ -303,7 +303,7 @@ func (h *Handler) add(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id, err := h.engine.Add(r.Context(), add)
+	id, _, err := h.engine.Add(r.Context(), add)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return

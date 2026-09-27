@@ -76,15 +76,20 @@ type AddRequest struct {
 }
 
 // Add adds a torrent and returns its gid.
-func (e *Engine) Add(ctx context.Context, req AddRequest) (int64, error) {
+//
+// duplicate reports that the infohash is already managed, in which case nothing
+// was added and id names the torrent that was already there. Transmission
+// answers such an add with `torrent-duplicate` rather than `torrent-added`, and
+// clients tell the two apart.
+func (e *Engine) Add(ctx context.Context, req AddRequest) (id int64, duplicate bool, err error) {
 	spec, err := e.spec(ctx, req)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 
 	dir, err := e.resolveDownloadDir(req.DownloadDir)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	spec.Storage = storage.NewFileWithCompletion(dir, e.completion)
 
@@ -101,12 +106,14 @@ func (e *Engine) Add(ctx context.Context, req AddRequest) (int64, error) {
 		spec.DisallowDataUpload = true
 	}
 
-	t, isNew, err := e.client.AddTorrentSpec(spec)
+	// anacrolix's "not already in the client" is not the question here - see
+	// the record check below.
+	t, _, err := e.client.AddTorrentSpec(spec)
 	if err != nil {
-		return 0, fmt.Errorf("failed to add the torrent: %w", err)
+		return 0, false, fmt.Errorf("failed to add the torrent: %w", err)
 	}
 
-	id, err := e.store.Put(ctx, &store.Torrent{
+	id, err = e.store.Put(ctx, &store.Torrent{
 		InfoHash: t.InfoHash(),
 		Name:     t.Name(),
 		Source:   req.Source,
@@ -117,14 +124,17 @@ func (e *Engine) Add(ctx context.Context, req AddRequest) (int64, error) {
 		Labels:   req.Labels,
 	})
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
-	if !isNew {
-		// Already managed. The store already had the gid, so hand it back
-		// rather than treating it as an error.
-		if existing := e.record(id); existing != nil {
-			return id, nil
-		}
+	// Already managed: hand the gid back rather than treating it as an error,
+	// and say that is what happened. The record is the test, not anacrolix's
+	// isNew - a torrent the store knows but that is not in our records (a `get`
+	// run, which restores nothing) is not in the session, so it is not a
+	// duplicate and does need a record built below.
+	if existing := e.record(id); existing != nil {
+		slog.Info("torrent already added", "id", id, "name", t.Name(),
+			"infohash", t.InfoHash().HexString())
+		return id, true, nil
 	}
 
 	rec := &record{
@@ -147,7 +157,7 @@ func (e *Engine) Add(ctx context.Context, req AddRequest) (int64, error) {
 	e.watch(rec, filtering)
 	slog.Info("torrent added", "id", id, "name", t.Name(),
 		"infohash", t.InfoHash().HexString(), "dir", dir, "paused", req.Paused)
-	return id, nil
+	return id, false, nil
 }
 
 // spec turns an AddRequest into a TorrentSpec, fetching a .torrent by URL

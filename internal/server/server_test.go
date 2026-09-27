@@ -19,7 +19,9 @@ import (
 // stubEngine satisfies both HTTP layers' views of the engine.
 type stubEngine struct{ torrents []engine.Status }
 
-func (s *stubEngine) Add(context.Context, engine.AddRequest) (int64, error) { return 1, nil }
+func (s *stubEngine) Add(context.Context, engine.AddRequest) (int64, bool, error) {
+	return 1, false, nil
+}
 func (s *stubEngine) Status(id int64) (engine.Status, bool) {
 	for _, t := range s.torrents {
 		if t.ID == id {

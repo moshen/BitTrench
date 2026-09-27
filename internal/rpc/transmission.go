@@ -68,7 +68,7 @@ const rpcVersion = 17
 // rather than depending on *engine.Engine keeps the RPC layer testable without
 // a tunnel, which is what makes the contract above cheap to pin down.
 type Torrents interface {
-	Add(ctx context.Context, req engine.AddRequest) (int64, error)
+	Add(ctx context.Context, req engine.AddRequest) (id int64, duplicate bool, err error)
 	Status(id int64) (engine.Status, bool)
 	List() []engine.Status
 	Files(id int64) []engine.File
@@ -303,7 +303,7 @@ func (h *Handler) torrentAdd(ctx context.Context, raw json.RawMessage) (any, err
 		return nil, fmt.Errorf("missing 'filename' or 'metainfo' argument")
 	}
 
-	id, err := h.engine.Add(ctx, req)
+	id, duplicate, err := h.engine.Add(ctx, req)
 	if err != nil {
 		return nil, err
 	}
@@ -311,8 +311,14 @@ func (h *Handler) torrentAdd(ctx context.Context, raw json.RawMessage) (any, err
 	if !ok {
 		return nil, fmt.Errorf("torrent %d disappeared immediately after being added", id)
 	}
-	// Transmission answers with torrent-added; clients read the id from it.
-	return map[string]any{"torrent-added": h.torrentFields(status, nil)}, nil
+	// Clients read the id out of whichever key comes back, and tell the two
+	// apart: re-adding a release that is already there is a normal event, and
+	// reporting it as a fresh add hides it.
+	key := "torrent-added"
+	if duplicate {
+		key = "torrent-duplicate"
+	}
+	return map[string]any{key: h.torrentFields(status, h.engine.Files(id))}, nil
 }
 
 type getArgs struct {
@@ -332,9 +338,14 @@ func (h *Handler) torrentGet(raw json.RawMessage) (any, error) {
 		return nil, err
 	}
 
-	wantFiles := false
+	// Every field derived from the file list, not just "files" - Sonarr and
+	// Radarr ask for the file count without asking for the files, and a client
+	// asking only for "wanted" used to get an empty array. No named fields at
+	// all means "everything", so the list is needed then too.
+	wantFiles := len(args.Fields) == 0
 	for _, f := range args.Fields {
-		if f == "files" {
+		switch f {
+		case "files", "fileStats", "fileCount", "file-count", "wanted", "priorities":
 			wantFiles = true
 		}
 	}
@@ -622,6 +633,20 @@ func (h *Handler) torrentFields(s engine.Status, files []engine.File) map[string
 		secondsSeeding = int64(time.Since(s.FinishedAt).Seconds())
 	}
 
+	// secondsDownloading is wall-clock time from the add to finishing, or to
+	// now while it is still going. An approximation: time spent paused counts
+	// towards it, which the engine does not record separately. Both clients ask
+	// for the field and neither acts on it, so an honest approximation beats the
+	// zero they were getting.
+	var secondsDownloading int64
+	switch {
+	case s.AddedAt.IsZero():
+	case !s.FinishedAt.IsZero():
+		secondsDownloading = int64(s.FinishedAt.Sub(s.AddedAt).Seconds())
+	default:
+		secondsDownloading = int64(time.Since(s.AddedAt).Seconds())
+	}
+
 	var addedDate int64
 	if !s.AddedAt.IsZero() {
 		addedDate = s.AddedAt.Unix()
@@ -646,6 +671,7 @@ func (h *Handler) torrentFields(s engine.Status, files []engine.File) map[string
 	}
 
 	fileList := make([]map[string]any, 0, len(files))
+	fileStats := make([]map[string]any, 0, len(files))
 	wanted := make([]int, 0, len(files))
 	priorities := make([]int, 0, len(files))
 	for _, f := range files {
@@ -654,13 +680,24 @@ func (h *Handler) torrentFields(s engine.Status, files []engine.File) map[string
 			"length":         f.Length,
 			"bytesCompleted": f.Completed,
 		})
+		priority := 0
+		if !f.Selected {
+			priority = -1
+		}
+		// fileStats is the modern per-file shape, carrying the same three facts
+		// the parallel wanted/priorities arrays do. Clients read one or the
+		// other, so both are published.
+		fileStats = append(fileStats, map[string]any{
+			"bytesCompleted": f.Completed,
+			"wanted":         f.Selected,
+			"priority":       priority,
+		})
 		if f.Selected {
 			wanted = append(wanted, 1)
-			priorities = append(priorities, 0)
 		} else {
 			wanted = append(wanted, 0)
-			priorities = append(priorities, -1)
 		}
+		priorities = append(priorities, priority)
 	}
 
 	return map[string]any{
@@ -675,22 +712,23 @@ func (h *Handler) torrentFields(s engine.Status, files []engine.File) map[string
 		"haveValid":  s.CompletedBytes,
 		// downloadedEver is bytes written to disk for this torrent; the
 		// completed size is the honest approximation we can offer.
-		"downloadedEver":   s.CompletedBytes,
-		"uploadedEver":     s.UploadedBytes,
-		"leftUntilDone":    leftUntilDone,
-		"sizeWhenDone":     sizeWhenDone,
-		"percentDone":      percentDone,
-		"percentComplete":  percentComplete,
-		"rateDownload":     int64(s.DownloadRate),
-		"rateUpload":       int64(s.UploadRate),
-		"eta":              etaSeconds(s, leftUntilDone),
-		"isFinished":       complete,
-		"isStalled":        false,
-		"peersConnected":   s.Peers,
-		"peersSendingToUs": s.Seeders,
-		"secondsSeeding":   secondsSeeding,
-		"addedDate":        addedDate,
-		"uploadRatio":      s.Ratio(),
+		"downloadedEver":     s.CompletedBytes,
+		"uploadedEver":       s.UploadedBytes,
+		"leftUntilDone":      leftUntilDone,
+		"sizeWhenDone":       sizeWhenDone,
+		"percentDone":        percentDone,
+		"percentComplete":    percentComplete,
+		"rateDownload":       int64(s.DownloadRate),
+		"rateUpload":         int64(s.UploadRate),
+		"eta":                etaSeconds(s, leftUntilDone),
+		"isFinished":         complete,
+		"isStalled":          false,
+		"peersConnected":     s.Peers,
+		"peersSendingToUs":   s.Seeders,
+		"secondsSeeding":     secondsSeeding,
+		"secondsDownloading": secondsDownloading,
+		"addedDate":          addedDate,
+		"uploadRatio":        s.Ratio(),
 		// The torrent's own caps as a client set them. Mode 0 is Transmission's
 		// TR_RATIOLIMIT_GLOBAL - follow the session limit - which is what an
 		// untouched torrent reports, and then the limit reported alongside it is
@@ -706,8 +744,13 @@ func (h *Handler) torrentFields(s engine.Status, files []engine.File) map[string
 		// for every torrent is simply a lie.
 		"downloadDir": s.SavePath,
 		"files":       fileList,
+		"fileStats":   fileStats,
 		"wanted":      wanted,
 		"priorities":  priorities,
+		// Both spellings: file-count is Transmission's, fileCount is Vuze's,
+		// and Sonarr and Radarr ask for both without knowing which they will get.
+		"file-count":  len(files),
+		"fileCount":   len(files),
 		"error":       errCode,
 		"errorString": s.Error,
 		// Always an array, never null: a client that filters on it should see

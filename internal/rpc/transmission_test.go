@@ -50,6 +50,10 @@ type fakeEngine struct {
 	selectionSet  map[int64][]bool
 	seedLimitsSet map[int64]store.SeedLimits
 	setLabelsErr  error
+	// addDuplicate makes Add report the infohash as already managed, which is
+	// what makes Transmission answer torrent-duplicate.
+	addDuplicate bool
+	duplicateID  int64
 }
 
 func newFakeEngine() *fakeEngine {
@@ -64,9 +68,12 @@ func newFakeEngine() *fakeEngine {
 	}
 }
 
-func (f *fakeEngine) Add(_ context.Context, req engine.AddRequest) (int64, error) {
+func (f *fakeEngine) Add(_ context.Context, req engine.AddRequest) (int64, bool, error) {
 	if f.addErr != nil {
-		return 0, f.addErr
+		return 0, false, f.addErr
+	}
+	if f.addDuplicate {
+		return f.duplicateID, true, nil
 	}
 	f.added = append(f.added, req)
 	id := int64(len(f.torrents) + 1)
@@ -78,7 +85,7 @@ func (f *fakeEngine) Add(_ context.Context, req engine.AddRequest) (int64, error
 		ID: id, Name: "added", State: engine.StateInitialising,
 		SavePath: dir, Paused: req.Paused, AddedAt: time.Now(),
 	})
-	return id, nil
+	return id, false, nil
 }
 
 func (f *fakeEngine) Status(id int64) (engine.Status, bool) {
@@ -1171,5 +1178,104 @@ func TestTorrentSetWithoutSeedFieldsWritesNoLimits(t *testing.T) {
 	}
 	if _, touched := f.seedLimitsSet[1]; touched {
 		t.Error("seed limits were written by a torrent-set that did not mention them")
+	}
+}
+
+// Re-adding a release that is already there is a normal event - Radarr does it
+// constantly - and Transmission answers it with torrent-duplicate. Reporting a
+// fresh add hides it from a client that tells the two apart.
+func TestTorrentAddReportsADuplicate(t *testing.T) {
+	f := newFakeEngine()
+	f.torrents = []engine.Status{{ID: 7, Name: "already here"}}
+	f.addDuplicate, f.duplicateID = true, 7
+	h := newHandler(t, f, nil)
+
+	args, result := call(t, h, "torrent-add", map[string]any{"filename": "magnet:?xt=urn:btih:abc"})
+	if result != "success" {
+		t.Fatalf("a duplicate add is not a failure, got %q", result)
+	}
+	if _, ok := args["torrent-added"]; ok {
+		t.Error("a duplicate was reported as torrent-added")
+	}
+	dup, ok := args["torrent-duplicate"].(map[string]any)
+	if !ok {
+		t.Fatalf("no torrent-duplicate in %v", args)
+	}
+	if dup["id"] != float64(7) {
+		t.Errorf("id = %v, want the existing torrent's 7", dup["id"])
+	}
+}
+
+// Sonarr and Radarr ask for the file count without asking for the files, and a
+// client asking only for "wanted" used to get an empty array: the file list was
+// fetched for the "files" field alone.
+func TestFileDerivedFieldsFetchTheFileList(t *testing.T) {
+	f := newFakeEngine()
+	f.torrents = []engine.Status{{ID: 1}}
+	f.files[1] = []engine.File{
+		{Index: 0, Path: "a.mkv", Length: 10, Completed: 10, Selected: true},
+		{Index: 1, Path: "b.iso", Length: 20, Selected: false},
+	}
+	h := newHandler(t, f, nil)
+
+	for _, field := range []string{"fileCount", "file-count", "wanted", "priorities", "fileStats"} {
+		t.Run(field, func(t *testing.T) {
+			args, _ := call(t, h, "torrent-get", map[string]any{"fields": []string{field}})
+			got := args["torrents"].([]any)[0].(map[string]any)[field]
+			switch v := got.(type) {
+			case float64:
+				if v != 2 {
+					t.Errorf("%s = %v, want 2", field, v)
+				}
+			case []any:
+				if len(v) != 2 {
+					t.Errorf("%s has %d entries, want 2", field, len(v))
+				}
+			default:
+				t.Errorf("%s came back as %T", field, got)
+			}
+		})
+	}
+}
+
+// fileStats carries the same three facts as the parallel wanted/priorities
+// arrays; clients read one or the other.
+func TestFileStats(t *testing.T) {
+	f := newFakeEngine()
+	f.torrents = []engine.Status{{ID: 1}}
+	f.files[1] = []engine.File{
+		{Index: 0, Path: "a.mkv", Length: 10, Completed: 4, Selected: true},
+		{Index: 1, Path: "b.iso", Length: 20, Selected: false},
+	}
+	args, _ := call(t, newHandler(t, f, nil), "torrent-get",
+		map[string]any{"fields": []string{"fileStats"}})
+	stats := args["torrents"].([]any)[0].(map[string]any)["fileStats"].([]any)
+
+	first := stats[0].(map[string]any)
+	if first["bytesCompleted"] != float64(4) || first["wanted"] != true || first["priority"] != float64(0) {
+		t.Errorf("wanted file's stats = %v", first)
+	}
+	second := stats[1].(map[string]any)
+	if second["wanted"] != false || second["priority"] != float64(-1) {
+		t.Errorf("unwanted file's stats = %v", second)
+	}
+}
+
+// secondsDownloading stops at the finish rather than running forever.
+func TestSecondsDownloading(t *testing.T) {
+	f := newFakeEngine()
+	f.torrents = []engine.Status{
+		{ID: 1, AddedAt: time.Now().Add(-10 * time.Minute)},
+		{ID: 2, AddedAt: time.Now().Add(-10 * time.Minute), FinishedAt: time.Now().Add(-8 * time.Minute)},
+	}
+	args, _ := call(t, newHandler(t, f, nil), "torrent-get",
+		map[string]any{"fields": []string{"secondsDownloading"}})
+	list := args["torrents"].([]any)
+
+	if got := list[0].(map[string]any)["secondsDownloading"].(float64); got < 590 || got > 610 {
+		t.Errorf("an unfinished torrent reported %v, want about 600", got)
+	}
+	if got := list[1].(map[string]any)["secondsDownloading"].(float64); got < 110 || got > 130 {
+		t.Errorf("a finished torrent reported %v, want about 120", got)
 	}
 }

@@ -82,7 +82,7 @@ func TestLocalE2EWithRealTorrent(t *testing.T) {
 	base := "http://" + srv.Addr().String()
 	t.Logf("daemon listening on %s", base)
 
-	id, err := eng.Add(ctx, engine.AddRequest{Metainfo: blob})
+	id, _, err := eng.Add(ctx, engine.AddRequest{Metainfo: blob})
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}

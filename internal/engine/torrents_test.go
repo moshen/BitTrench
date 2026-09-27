@@ -63,7 +63,7 @@ func TestExtensionAllowListSelectsOnlyMatchingFiles(t *testing.T) {
 		c.allowedExtensions = []string{"mkv", ".MP4"}
 		c.savePath = dataDir
 	})
-	id, err := h.engine.Add(context.Background(), AddRequest{Metainfo: mi})
+	id, _, err := h.engine.Add(context.Background(), AddRequest{Metainfo: mi})
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestExtensionAllowListRejectsATorrentWithNoMatches(t *testing.T) {
 		c.allowedExtensions = []string{"mkv"}
 		c.savePath = dataDir
 	})
-	id, err := h.engine.Add(context.Background(), AddRequest{Metainfo: mi})
+	id, _, err := h.engine.Add(context.Background(), AddRequest{Metainfo: mi})
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestPausedStateIsOwnedAndPersisted(t *testing.T) {
 	h := newHarness(t, func(c *cfgOpts) { c.savePath = dataDir })
 	ctx := context.Background()
 
-	id, err := h.engine.Add(ctx, AddRequest{Metainfo: mi})
+	id, _, err := h.engine.Add(ctx, AddRequest{Metainfo: mi})
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -178,7 +178,7 @@ func TestAddPausedStartsStopped(t *testing.T) {
 	mi, dataDir := buildTorrent(t, map[string]string{"movie.mkv": "video"})
 	h := newHarness(t, func(c *cfgOpts) { c.savePath = dataDir })
 
-	id, err := h.engine.Add(context.Background(), AddRequest{Metainfo: mi, Paused: true})
+	id, _, err := h.engine.Add(context.Background(), AddRequest{Metainfo: mi, Paused: true})
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -194,7 +194,7 @@ func TestRestoreBringsTorrentsBack(t *testing.T) {
 	ctx := context.Background()
 
 	h := newHarness(t, func(c *cfgOpts) { c.savePath = dataDir })
-	id, err := h.engine.Add(ctx, AddRequest{Metainfo: mi, Paused: true})
+	id, _, err := h.engine.Add(ctx, AddRequest{Metainfo: mi, Paused: true})
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -263,7 +263,7 @@ func TestRestoreBringsTorrentsBack(t *testing.T) {
 // dict resolves. Nothing on this path may panic.
 func TestMetadataDependentCallsAreSafeBeforeInfo(t *testing.T) {
 	h := newHarness(t, nil)
-	id, err := h.engine.Add(context.Background(), AddRequest{
+	id, _, err := h.engine.Add(context.Background(), AddRequest{
 		Source: "magnet:?xt=urn:btih:0000000000000000000000000000000000000001&dn=pending",
 	})
 	if err != nil {
@@ -306,7 +306,7 @@ func TestRemoveDeletesDataAndPrunesDirectories(t *testing.T) {
 	ctx := context.Background()
 	h := newHarness(t, func(c *cfgOpts) { c.savePath = dataDir })
 
-	id, err := h.engine.Add(ctx, AddRequest{Metainfo: mi, Paused: true})
+	id, _, err := h.engine.Add(ctx, AddRequest{Metainfo: mi, Paused: true})
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -345,7 +345,7 @@ func TestRemoveKeepsDataWhenNotAsked(t *testing.T) {
 	ctx := context.Background()
 	h := newHarness(t, func(c *cfgOpts) { c.savePath = dataDir })
 
-	id, err := h.engine.Add(ctx, AddRequest{Metainfo: mi, Paused: true})
+	id, _, err := h.engine.Add(ctx, AddRequest{Metainfo: mi, Paused: true})
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -403,7 +403,7 @@ func TestExtensionMatchingIsCaseInsensitiveAndDotOptional(t *testing.T) {
 func TestEmptyAllowListDisablesTheFilter(t *testing.T) {
 	mi, dataDir := buildTorrent(t, map[string]string{"movie.mkv": "v", "readme.nfo": "n"})
 	h := newHarness(t, func(c *cfgOpts) { c.savePath = dataDir })
-	id, err := h.engine.Add(context.Background(), AddRequest{Metainfo: mi})
+	id, _, err := h.engine.Add(context.Background(), AddRequest{Metainfo: mi})
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -458,7 +458,7 @@ func TestPauseClearsPiecePrioritiesRatherThanDisallowingDownload(t *testing.T) {
 	ctx := context.Background()
 	h := newHarness(t, func(c *cfgOpts) { c.savePath = dataDir })
 
-	id, err := h.engine.Add(ctx, AddRequest{Metainfo: mi})
+	id, _, err := h.engine.Add(ctx, AddRequest{Metainfo: mi})
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -505,7 +505,7 @@ func TestResumeRestoresTheSelectionRatherThanEverything(t *testing.T) {
 		c.allowedExtensions = []string{"mkv"}
 	})
 
-	id, err := h.engine.Add(ctx, AddRequest{Metainfo: mi})
+	id, _, err := h.engine.Add(ctx, AddRequest{Metainfo: mi})
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -529,7 +529,7 @@ func TestPausedAddWantsNothing(t *testing.T) {
 	mi, dataDir := buildTorrent(t, map[string]string{"movie.mkv": "video"})
 	h := newHarness(t, func(c *cfgOpts) { c.savePath = dataDir })
 
-	id, err := h.engine.Add(context.Background(), AddRequest{Metainfo: mi, Paused: true})
+	id, _, err := h.engine.Add(context.Background(), AddRequest{Metainfo: mi, Paused: true})
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -555,7 +555,7 @@ func TestSelectedBytesCountsOnlyTheSelectedFiles(t *testing.T) {
 		c.allowedExtensions = []string{"mkv"}
 		c.savePath = dataDir
 	})
-	id, err := h.engine.Add(context.Background(), AddRequest{Metainfo: mi})
+	id, _, err := h.engine.Add(context.Background(), AddRequest{Metainfo: mi})
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -613,7 +613,7 @@ func TestSelectedBytesCountsOnlyTheSelectedFiles(t *testing.T) {
 // is how a caller tells that from "all of it is done".
 func TestSelectedBytesReportsNoFilesBeforeMetadata(t *testing.T) {
 	h := newHarness(t, nil)
-	id, err := h.engine.Add(context.Background(), AddRequest{
+	id, _, err := h.engine.Add(context.Background(), AddRequest{
 		Source: "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
 	})
 	if err != nil {
@@ -635,7 +635,7 @@ func TestLabelsSurviveARestart(t *testing.T) {
 	h := newHarness(t, func(c *cfgOpts) { c.savePath = dataDir })
 	ctx := context.Background()
 
-	id, err := h.engine.Add(ctx, AddRequest{Metainfo: mi, Labels: []string{"tv-sonarr"}})
+	id, _, err := h.engine.Add(ctx, AddRequest{Metainfo: mi, Labels: []string{"tv-sonarr"}})
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -668,7 +668,7 @@ func TestStatusLabelsAreACopy(t *testing.T) {
 	h := newHarness(t, func(c *cfgOpts) { c.savePath = dataDir })
 	ctx := context.Background()
 
-	id, err := h.engine.Add(ctx, AddRequest{Metainfo: mi, Labels: []string{"original"}})
+	id, _, err := h.engine.Add(ctx, AddRequest{Metainfo: mi, Labels: []string{"original"}})
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}

@@ -319,9 +319,14 @@ func get(ctx context.Context, configPath string, args []string) error {
 	}
 	defer s.close()
 
-	id, err := s.eng.Add(ctx, req)
+	id, duplicate, err := s.eng.Add(ctx, req)
 	if err != nil {
 		return err
+	}
+	if duplicate {
+		// Not an error: the state database already had it, so this run picks up
+		// where the last one left off.
+		slog.Info("already known, resuming it", "id", id)
 	}
 	if err := waitForDownload(ctx, s.eng, id); err != nil {
 		return err
