@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"math"
 	"slices"
 	"time"
 
@@ -320,14 +321,32 @@ func (e *Engine) Peers(id int64) []Peer {
 			Addr:         addr,
 			Client:       client,
 			Source:       string(c.Discovery),
-			DownloadRate: stats.DownloadRate,
-			UploadRate:   stats.LastWriteUploadRate,
+			DownloadRate: finite(stats.DownloadRate),
+			UploadRate:   finite(stats.LastWriteUploadRate),
 			BytesRead:    stats.BytesReadData.Int64(),
 			BytesWritten: stats.BytesWrittenData.Int64(),
 			PiecesHave:   stats.RemotePieceCount,
 		})
 	}
 	return out
+}
+
+// finite maps a rate that is not a number to zero.
+//
+// anacrolix derives a peer's rates by dividing bytes transferred by an elapsed
+// time that can legitimately be zero: Peer.downloadRate divides by
+// totalExpectingTime, and the message writer divides by the duration of its last
+// write. So a peer that has just moved its first chunk can report +Inf, and one
+// that has moved nothing in no time can report NaN.
+//
+// Neither is a rate, and neither can be encoded as JSON. Passing one on left the
+// entire peers response an empty body, which the UI reported as a JSON parse
+// error at line 1 column 1.
+func finite(r float64) float64 {
+	if math.IsNaN(r) || math.IsInf(r, 0) {
+		return 0
+	}
+	return r
 }
 
 // AnnounceURLs returns the announce URLs in use, for the detail view. Note

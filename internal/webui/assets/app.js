@@ -81,7 +81,12 @@ function fmtBytes(b) {
 		v /= 1024;
 		i++;
 	}
-	return `${i === 0 ? v : v.toFixed(v < 10 ? 2 : 1)} ${units[i]}`;
+	// Bytes are rounded rather than printed as they come. A rate is a float, and
+	// this used to hand back its full precision at the byte scale: a torrent
+	// that had gone quiet showed "0.0000025947061343373236 B/s". Fractions of a
+	// byte say nothing that the integer does not.
+	if (i === 0) return `${Math.round(v)} ${units[i]}`;
+	return `${v.toFixed(v < 10 ? 2 : 1)} ${units[i]}`;
 }
 function fmtBytesPerSec(b) {
 	return `${fmtBytes(b)}/s`;

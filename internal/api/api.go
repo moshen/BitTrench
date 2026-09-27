@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -66,6 +67,22 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET "+Prefix+"/torrents/{id}/pieces", h.pieces)
 	mux.HandleFunc("POST "+Prefix+"/torrents/{id}/start", h.start)
 	mux.HandleFunc("POST "+Prefix+"/torrents/{id}/stop", h.stop)
+}
+
+// roundRate trims a rate to two decimals before it goes on the wire.
+//
+// The rates are smoothed floats, so their tail is arithmetic rather than
+// measurement. A client that prints what it is given should not have to know
+// that, and 0.0000025947061343373236 B/s is not a number to show anybody. Two
+// decimals is already past the point where a bytes-per-second figure carries
+// meaning.
+func roundRate(r float64) float64 {
+	// NaN and the infinities are not rates, and encoding/json refuses them
+	// outright, which would cost the whole response rather than this one field.
+	if math.IsNaN(r) || math.IsInf(r, 0) {
+		return 0
+	}
+	return math.Round(r*100) / 100
 }
 
 // Torrent is the list and detail representation.
@@ -124,8 +141,8 @@ func torrentOf(s engine.Status) Torrent {
 		SizeWhenDone:   s.SizeWhenDone,
 		LeftUntilDone:  s.LeftUntilDone,
 		UploadedBytes:  s.UploadedBytes,
-		DownloadRate:   s.DownloadRate,
-		UploadRate:     s.UploadRate,
+		DownloadRate:   roundRate(s.DownloadRate),
+		UploadRate:     roundRate(s.UploadRate),
 		Peers:          s.Peers,
 		Seeders:        s.Seeders,
 		Ratio:          s.Ratio(),
@@ -252,7 +269,7 @@ func (h *Handler) peers(w http.ResponseWriter, r *http.Request) {
 	for _, p := range enginePeers {
 		out = append(out, Peer{
 			Addr: p.Addr, Client: p.Client, Source: p.Source,
-			DownloadRate: p.DownloadRate, UploadRate: p.UploadRate,
+			DownloadRate: roundRate(p.DownloadRate), UploadRate: roundRate(p.UploadRate),
 			BytesRead: p.BytesRead, BytesWritten: p.BytesWritten,
 			PiecesHave: p.PiecesHave,
 		})
@@ -380,8 +397,8 @@ func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 		completed += s.CompletedBytes
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"download_rate":   down,
-		"upload_rate":     up,
+		"download_rate":   roundRate(down),
+		"upload_rate":     roundRate(up),
 		"torrents":        active + paused + errored,
 		"active":          active,
 		"paused":          paused,
@@ -403,12 +420,25 @@ func (h *Handler) id(w http.ResponseWriter, r *http.Request) (int64, bool) {
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {
+	// Marshalled before the status goes out, not streamed after it.
+	//
+	// Encoding straight to the ResponseWriter means a value encoding/json
+	// refuses (a NaN rate, say) arrives as 200 with an empty body and a
+	// debug-level log: the client reports a JSON parse error at line 1 column 1
+	// and the server believes it succeeded. Buffering costs a copy of a response
+	// that is already small, and turns that into a 500 that says what happened.
+	raw, err := json.Marshal(body)
+	if err != nil {
+		slog.Error("failed to encode an API response", "error", err)
+		http.Error(w, `{"error":"failed to encode the response"}`, http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	// Stale cached responses once resurrected bugs that had already been
 	// fixed, so nothing this daemon serves is cacheable.
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
-	if err := json.NewEncoder(w).Encode(body); err != nil {
+	if _, err := w.Write(append(raw, '\n')); err != nil {
 		slog.Debug("failed to write an API response", "error", err)
 	}
 }

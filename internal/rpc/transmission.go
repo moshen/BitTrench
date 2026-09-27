@@ -230,12 +230,24 @@ type response struct {
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {
+	// Marshalled before the status goes out. Streaming into the ResponseWriter
+	// means a value encoding/json refuses, a NaN in a rate or a limit, arrives as
+	// a success with an empty body, which a client reports as unparseable JSON
+	// while the server believes it answered.
+	raw, err := json.Marshal(body)
+	if err != nil {
+		slog.Error("failed to encode an RPC response", "error", err)
+		// Still HTTP 200 with the failure in `result`: that is Transmission's
+		// convention, and the *arr clients surface a result string while an HTTP
+		// error makes them drop the connection.
+		raw, status = []byte(`{"result":"failed to encode the response"}`), http.StatusOK
+	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	// Stale cached JS once resurrected bugs that had already been fixed, so
 	// nothing this daemon serves is cacheable.
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
-	if err := json.NewEncoder(w).Encode(body); err != nil {
+	if _, err := w.Write(append(raw, '\n')); err != nil {
 		slog.Debug("failed to write an RPC response", "error", err)
 	}
 }

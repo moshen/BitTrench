@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	"math"
 	"net/http"
 	"path/filepath"
 	"regexp"
@@ -19,7 +20,10 @@ import (
 )
 
 // stubEngine satisfies both HTTP layers' views of the engine.
-type stubEngine struct{ torrents []engine.Status }
+type stubEngine struct {
+	torrents []engine.Status
+	peers    []engine.Peer
+}
 
 func (s *stubEngine) Add(context.Context, engine.AddRequest) (int64, bool, error) {
 	return 1, false, nil
@@ -38,7 +42,7 @@ func (s *stubEngine) SetLabels(context.Context, int64, []string) error { return 
 
 func (s *stubEngine) SetSeedLimits(context.Context, int64, store.SeedLimits) error { return nil }
 func (s *stubEngine) MoveInQueue(context.Context, int64, engine.Move) error        { return nil }
-func (s *stubEngine) Peers(int64) []engine.Peer                                    { return nil }
+func (s *stubEngine) Peers(int64) []engine.Peer                                    { return s.peers }
 func (s *stubEngine) AnnounceURLs(int64) []string                                  { return nil }
 func (s *stubEngine) Bitfield(int64) ([]byte, int)                                 { return nil, 0 }
 func (s *stubEngine) SetFileSelection(context.Context, int64, []bool) error        { return nil }
@@ -59,6 +63,8 @@ func start(t *testing.T, customise func(*config.AppConfig)) (*Server, string) {
 	srv, err := New(&cfg, &stubEngine{torrents: []engine.Status{{
 		ID: 1, Name: "one", State: engine.StateQueued, Queued: true, QueuePosition: 2,
 		TotalBytes: 1000, CompletedBytes: 400, SizeWhenDone: 800, LeftUntilDone: 400,
+		// The tail of a smoothed rate, as the sampler used to hand it over.
+		DownloadRate: 0.0000025947061343373236, UploadRate: 1234.56789,
 	}}})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -128,6 +134,15 @@ func TestServesTheNativeAPI(t *testing.T) {
 	}
 	if got.State != string(engine.StateQueued) {
 		t.Errorf("state = %q, want %q", got.State, engine.StateQueued)
+	}
+	// Rates go out rounded. A client that prints what it is given must not be
+	// handed 0.0000025947061343373236 to render as a speed.
+	if got.DownloadRate != 0 {
+		t.Errorf("download_rate = %v, want 0: the tail of a decayed rate is not a speed",
+			got.DownloadRate)
+	}
+	if got.UploadRate != 1234.57 {
+		t.Errorf("upload_rate = %v, want 1234.57", got.UploadRate)
 	}
 }
 
@@ -229,5 +244,64 @@ func TestEveryAssetThePageReferencesIsServed(t *testing.T) {
 					path, got, want)
 			}
 		})
+	}
+}
+
+// A peer whose rate is not a number must not cost the whole response.
+//
+// anacrolix divides bytes by an elapsed time that can be zero, so a peer can
+// report +Inf or NaN. encoding/json refuses both, and the API used to have
+// already sent 200 and the JSON content type by then: the body came out empty
+// and the UI reported "Peers unavailable: JSON.parse: unexpected end of data at
+// line 1 column 1".
+func TestPeersSurviveANonFiniteRate(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Torrent.SavePath = t.TempDir()
+	cfg.API.ListenPort = 0
+	srv, err := New(&cfg, &stubEngine{
+		torrents: []engine.Status{{ID: 1, Name: "one"}},
+		peers: []engine.Peer{
+			{Addr: "10.0.0.5:6881", Client: "qBittorrent/5.1.0",
+				DownloadRate: math.Inf(1), UploadRate: math.NaN()},
+			{Addr: "10.0.0.6:6881", DownloadRate: 1234.5678},
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	go srv.Serve()
+	t.Cleanup(func() { srv.Shutdown(context.Background()) })
+
+	resp, err := http.Get("http://" + srv.Addr().String() + api.Prefix + "/torrents/1/peers")
+	if err != nil {
+		t.Fatalf("GET peers: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reading the body: %v", err)
+	}
+	if len(body) == 0 {
+		t.Fatal("empty body: this is the bug, and the client cannot parse it")
+	}
+
+	var payload struct {
+		Peers []api.Peer `json:"peers"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("the response is not JSON: %v (%q)", err, body)
+	}
+	if len(payload.Peers) != 2 {
+		t.Fatalf("peers = %+v, want 2", payload.Peers)
+	}
+	if payload.Peers[0].DownloadRate != 0 || payload.Peers[0].UploadRate != 0 {
+		t.Errorf("a non-finite rate came through as %v/%v, want 0/0",
+			payload.Peers[0].DownloadRate, payload.Peers[0].UploadRate)
+	}
+	if payload.Peers[1].DownloadRate != 1234.57 {
+		t.Errorf("a real rate = %v, want it rounded to 1234.57", payload.Peers[1].DownloadRate)
 	}
 }

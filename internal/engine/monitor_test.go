@@ -260,3 +260,45 @@ func TestSeedLimitsFireForAFilteredTorrent(t *testing.T) {
 		t.Error("the seed time cap did not pause a filtered torrent that had met it")
 	}
 }
+
+// A torrent that stops transferring must report exactly zero, not the tail of
+// an exponential decay. The smoothing never reaches zero on its own, so a fast
+// torrent that went quiet a minute ago used to report 0.0000025 B/s, which the
+// UI printed in full and every "> 0" test read as still running.
+func TestSamplerSettlesToZeroWhenTrafficStops(t *testing.T) {
+	s := newSampler()
+	start := time.Now()
+	s.observeRaw(1, 0, 0, start)
+	s.observeRaw(1, 1<<20, 1<<20, start.Add(time.Second))
+	if r := s.Rates(1); r.Download <= 0 {
+		t.Fatalf("a live transfer reported %v", r.Download)
+	}
+
+	// The counters stop moving. 0.6 per tick from 1 MiB/s needs 28 ticks to fall
+	// under a byte per second; 40 leaves room without waiting on the arithmetic.
+	for i := 2; i < 42; i++ {
+		s.observeRaw(1, 1<<20, 1<<20, start.Add(time.Duration(i)*time.Second))
+	}
+	r := s.Rates(1)
+	if r.Download != 0 || r.Upload != 0 {
+		t.Errorf("an idle torrent reports %v/%v, want exactly 0/0", r.Download, r.Upload)
+	}
+	if total := s.Totals(); total.Download != 0 || total.Upload != 0 {
+		t.Errorf("session totals are %v/%v, want exactly 0/0", total.Download, total.Upload)
+	}
+}
+
+// The floor is applied when rates are read, not when they are stored, and this
+// is why: a transfer slower than the floor still has to be able to climb past
+// it. Flooring the stored value would hold the rising edge down forever.
+func TestSamplerStillReportsASlowTransfer(t *testing.T) {
+	s := newSampler()
+	start := time.Now()
+	// 2 B/s sustained, which is below the floor for the first tick or two.
+	for i := 0; i < 20; i++ {
+		s.observeRaw(1, int64(2*i), 0, start.Add(time.Duration(i)*time.Second))
+	}
+	if r := s.Rates(1); r.Download < 1.5 {
+		t.Errorf("a sustained 2 B/s transfer reports %v, want it converging on 2", r.Download)
+	}
+}

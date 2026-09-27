@@ -22,6 +22,18 @@ const (
 	// smoothing weights the newest sample. Rates over BitTorrent are spiky
 	// enough that a raw per-second difference reads as noise.
 	smoothing = 0.4
+	// rateFloor is where a rate stops being a measurement.
+	//
+	// The smoothing is exponential, so a stopped transfer decays towards zero
+	// without ever arriving: a minute after a fast torrent goes quiet it still
+	// reports something like 0.0000025 B/s, which is not a speed, and anything
+	// testing "> 0" reads it as still running.
+	//
+	// Applied when the rates are read rather than when they are stored, which
+	// matters: flooring the stored value would also clamp the rising edge, and a
+	// genuinely slow transfer could never climb past the floor it was being held
+	// under.
+	rateFloor = 1.0
 )
 
 // rates is a torrent's current transfer rates, in bytes per second.
@@ -51,7 +63,7 @@ func newSampler() *sampler {
 func (s *sampler) Rates(id int64) rates {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.cur[id]
+	return settle(s.cur[id])
 }
 
 // Totals returns the summed rates across all torrents, for session-stats.
@@ -59,11 +71,26 @@ func (s *sampler) Totals() rates {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	var total rates
+	// Each torrent is settled before it is added, so a hundred idle torrents
+	// sum to zero rather than to a hundred fractions of a byte.
 	for _, r := range s.cur {
+		r = settle(r)
 		total.Download += r.Download
 		total.Upload += r.Upload
 	}
 	return total
+}
+
+// settle reports a rate that has decayed into noise as the zero it is heading
+// for. See rateFloor.
+func settle(r rates) rates {
+	if r.Download < rateFloor {
+		r.Download = 0
+	}
+	if r.Upload < rateFloor {
+		r.Upload = 0
+	}
+	return r
 }
 
 // observe folds one snapshot into the smoothed rates.
