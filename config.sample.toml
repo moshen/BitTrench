@@ -3,6 +3,14 @@
 # Copy this to config.toml and fill in the [wireguard] section from your VPN
 # provider's configuration. Unknown keys are a startup error, not a warning, so
 # a typo is reported rather than ignored.
+#
+# With no -config flag the daemon uses the first of these that exists:
+#   ./config.toml
+#   $XDG_CONFIG_HOME/bittrench/config.toml  (~/.config/bittrench/config.toml)
+#   %ProgramData%\bittrench\config.toml     (Windows only)
+#
+# The state database and the log directory default to sitting beside whichever
+# file is used, so where you put this decides where the daemon keeps its state.
 
 [wireguard]
 # Replace these with the base64 values from your own WireGuard configuration.

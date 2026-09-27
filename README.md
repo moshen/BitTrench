@@ -32,6 +32,31 @@ Copy `config.sample.toml` to `config.toml` and fill in the `[wireguard]`
 section from your provider's configuration. `wireguard.dns` is **required**:
 without it nothing can be resolved inside the tunnel.
 
+### Where the configuration lives
+
+`-config` wins whenever it is given, and a missing file behind it is an error
+rather than a reason to load a different one. Without the flag, the first of
+these that exists is used:
+
+1. `./config.toml`
+2. `$XDG_CONFIG_HOME/bittrench/config.toml`, or `~/.config/bittrench/config.toml`
+3. `%ProgramData%\bittrench\config.toml`, on Windows only
+
+The XDG location works on every platform, Windows included, so there is one
+answer to where a config goes wherever the daemon runs. The machine-wide Windows
+location comes last so a per-user file overrides it. If none exists, the error
+names every path it tried.
+
+The state database and the log directory default to sitting **beside the file
+that was chosen**, so its location also decides where the daemon keeps its
+state. Set `state_db_path` and `log_dir` to put them somewhere else.
+
+Installing the Windows service is the one case to be deliberate about: it
+registers whichever path was resolved when you ran `install`, and the service
+runs as LocalSystem rather than as you. Pass `-config` with the `%ProgramData%`
+path for a machine-wide service instead of letting it pick up the copy in your
+own profile. `install` prints the path it registered.
+
 ### Prove the tunnel works with your config
 
 ```sh

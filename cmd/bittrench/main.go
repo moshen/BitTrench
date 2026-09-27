@@ -53,27 +53,35 @@ usage:
   bittrench [-config PATH] serve           run under the Windows SCM
                                                (invoked by the SCM itself)
 
+configuration:
+  -config wins when given. Without it, the first of these that exists is used:
+    ./config.toml
+    $XDG_CONFIG_HOME/bittrench/config.toml  (~/.config/bittrench/config.toml)
+    %ProgramData%\bittrench\config.toml     (Windows only)
+  The state database and the log directory default to sitting beside whichever
+  file is chosen, so the location decides where the daemon keeps its state.
+
 flags:
 `
 
 func main() {
-	configPath := flag.String("config", "config.toml", "path to the configuration TOML file")
+	configPath := flag.String("config", "",
+		"path to the configuration TOML file (default: the first standard location that has one)")
 	flag.Usage = func() {
 		fmt.Fprint(flag.CommandLine.Output(), usage)
 		flag.PrintDefaults()
 	}
 	flag.Parse()
 
-	// The Windows SCM launches services with the working directory set to
-	// C:\Windows\System32, so a relative config path - and with it the state
-	// database and log directory that are resolved beside it - would land
-	// somewhere wrong. Absolute from here on. filepath.Abs rather than
-	// EvalSymlinks: the latter's Windows output carries a \\?\ prefix that
-	// works but logs badly.
-	absConfig, err := filepath.Abs(*configPath)
-	if err != nil {
-		fatal(fmt.Errorf("couldn't resolve the config path %q: %w", *configPath, err))
+	absConfig, configErr := resolveConfigPath(*configPath)
+	// Every command except uninstall needs to know where the config is, and
+	// uninstall must keep working on a machine that has none: it takes a service
+	// name, not a configuration.
+	if configErr != nil && flag.Arg(0) != "uninstall" {
+		fatal(configErr)
 	}
+
+	var err error
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -114,6 +122,34 @@ func main() {
 		}
 		fatal(err)
 	}
+}
+
+// resolveConfigPath settles on the configuration file to use.
+//
+// An explicit -config always wins, and a missing file behind it is that
+// command's error to report rather than a reason to fall back on some other
+// config: quietly loading a different file than the one asked for is worse than
+// failing. With no flag, the standard locations are searched.
+//
+// The result is absolute either way. The Windows SCM launches services with the
+// working directory set to C:\Windows\System32, so a relative config path, and
+// with it the state database and log directory resolved beside it, would land
+// somewhere wrong. filepath.Abs rather than EvalSymlinks: the latter's Windows
+// output carries a \\?\ prefix that works but logs badly.
+func resolveConfigPath(flagValue string) (string, error) {
+	path := flagValue
+	if path == "" {
+		discovered, err := config.Discover()
+		if err != nil {
+			return "", err
+		}
+		path = discovered
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("couldn't resolve the config path %q: %w", path, err)
+	}
+	return abs, nil
 }
 
 func fatal(err error) {
