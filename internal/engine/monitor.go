@@ -55,6 +55,9 @@ func (e *Engine) runMonitor() {
 			return
 		case <-ticker.C:
 			e.checkSeedLimits(ratioLimit, timeLimit)
+			// A torrent that finished since the last tick has freed its
+			// download slot for whatever is waiting behind it.
+			e.reconcileQueue()
 		}
 	}
 }

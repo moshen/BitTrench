@@ -26,6 +26,10 @@ import (
 // (changes on removal): Sonarr and Radarr require a stable integer id and will
 // lose track of a download whose id moves.
 //
+// `queue` holds the download-queue order. A torrent with no row has not been
+// placed yet and is sorted after those that have, by gid - which is add order -
+// so a database written before this table existed keeps a sensible order.
+//
 // `seed_limits` holds the per-torrent seed caps a client sets through
 // torrent-set. A missing row means "follow the session limits", which is what
 // Transmission's mode 0 means and what every torrent added before this table
@@ -61,6 +65,10 @@ CREATE TABLE IF NOT EXISTS labels (
   torrent_id  INTEGER NOT NULL REFERENCES torrents(id) ON DELETE CASCADE,
   label       TEXT    NOT NULL,
   PRIMARY KEY (torrent_id, label)
+);
+CREATE TABLE IF NOT EXISTS queue (
+  torrent_id  INTEGER NOT NULL PRIMARY KEY REFERENCES torrents(id) ON DELETE CASCADE,
+  position    INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS seed_limits (
   torrent_id  INTEGER NOT NULL PRIMARY KEY REFERENCES torrents(id) ON DELETE CASCADE,
@@ -106,7 +114,13 @@ type Torrent struct {
 	// SeedLimits are the per-torrent seed caps. The zero value is "follow the
 	// session limits".
 	SeedLimits SeedLimits
+	// QueuePosition is the torrent's place in the download queue, or -1 when it
+	// has never been placed.
+	QueuePosition int
 }
+
+// Unplaced is the QueuePosition of a torrent that has never been given one.
+const Unplaced = -1
 
 // SeedLimits are one torrent's seed caps, in the shape Transmission reports
 // them: a limit plus a mode saying whether to use it.
@@ -228,7 +242,43 @@ func (s *Store) List(ctx context.Context) ([]Torrent, error) {
 	if err := s.attachSeedLimits(ctx, out); err != nil {
 		return nil, err
 	}
+	if err := s.attachQueuePositions(ctx, out); err != nil {
+		return nil, err
+	}
 	return out, nil
+}
+
+// attachQueuePositions fills in QueuePosition across a torrent list, leaving -1
+// on any torrent that has never been placed.
+func (s *Store) attachQueuePositions(ctx context.Context, torrents []Torrent) error {
+	if len(torrents) == 0 {
+		return nil
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT torrent_id, position FROM queue`)
+	if err != nil {
+		return fmt.Errorf("failed to read the queue order: %w", err)
+	}
+	defer rows.Close()
+
+	byID := make(map[int64]int)
+	for rows.Next() {
+		var id, position int
+		if err := rows.Scan(&id, &position); err != nil {
+			return fmt.Errorf("failed to read a queue row: %w", err)
+		}
+		byID[int64(id)] = position
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for i := range torrents {
+		if position, ok := byID[torrents[i].ID]; ok {
+			torrents[i].QueuePosition = position
+			continue
+		}
+		torrents[i].QueuePosition = Unplaced
+	}
+	return nil
 }
 
 // attachSeedLimits fills in SeedLimits across a torrent list in one query.
@@ -391,6 +441,33 @@ func (s *Store) FileSelection(ctx context.Context, id int64) ([]bool, error) {
 		out[index] = selected != 0
 	}
 	return out, rows.Err()
+}
+
+// SetQueuePositions writes the whole queue order in one transaction.
+//
+// The order is rewritten wholesale rather than patched, because a move
+// renumbers everything after it and a half-applied renumber would leave two
+// torrents claiming one position.
+func (s *Store) SetQueuePositions(ctx context.Context, positions map[int64]int) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to record the queue order: %w", err)
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.PrepareContext(ctx,
+		`INSERT INTO queue (torrent_id, position) VALUES (?, ?)
+		 ON CONFLICT(torrent_id) DO UPDATE SET position = excluded.position`)
+	if err != nil {
+		return fmt.Errorf("failed to record the queue order: %w", err)
+	}
+	defer stmt.Close()
+	for id, position := range positions {
+		if _, err := stmt.ExecContext(ctx, id, position); err != nil {
+			return fmt.Errorf("failed to record the queue position of torrent %d: %w", id, err)
+		}
+	}
+	return tx.Commit()
 }
 
 // SetSeedLimits records a torrent's seed caps, replacing any already stored.

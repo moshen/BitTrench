@@ -68,6 +68,11 @@ type Engine struct {
 	mu      sync.RWMutex
 	records map[int64]*record
 
+	// queueMu serialises reconcileQueue, which is called from the monitor tick
+	// and from every path that changes what should be running. Two runs
+	// interleaving could leave a torrent held with a free slot ahead of it.
+	queueMu sync.Mutex
+
 	sampler *sampler
 	ctx     context.Context
 	cancel  context.CancelFunc

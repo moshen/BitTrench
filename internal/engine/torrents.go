@@ -50,6 +50,13 @@ type record struct {
 	// session limits, which is what every torrent does until a client sets
 	// otherwise through torrent-set.
 	SeedLimits store.SeedLimits
+	// QueuePosition is the torrent's place in the download queue.
+	QueuePosition int
+	// Queued is set while the queue is holding this torrent back. It is
+	// deliberately not Paused: both are expressed as "nothing is wanted", but
+	// only the user can clear Paused, while the queue clears Queued as slots
+	// free up. Runtime state - the position is what persists.
+	Queued bool
 
 	// storedFinishedAt is what the database currently holds, so the monitor
 	// writes only when the value actually changes rather than every tick.
@@ -138,23 +145,31 @@ func (e *Engine) Add(ctx context.Context, req AddRequest) (id int64, duplicate b
 	}
 
 	rec := &record{
-		ID:       id,
-		Torrent:  t,
-		Source:   req.Source,
-		SavePath: dir,
-		Paused:   req.Paused,
-		AddedAt:  time.Now(),
-		Labels:   slices.Clone(req.Labels),
-		ready:    make(chan struct{}),
+		ID:            id,
+		Torrent:       t,
+		Source:        req.Source,
+		SavePath:      dir,
+		Paused:        req.Paused,
+		AddedAt:       time.Now(),
+		Labels:        slices.Clone(req.Labels),
+		QueuePosition: e.nextQueuePosition(),
+		ready:         make(chan struct{}),
 	}
 	e.mu.Lock()
 	e.records[id] = rec
 	e.mu.Unlock()
 
+	if err := e.store.SetQueuePositions(ctx, map[int64]int{id: rec.QueuePosition}); err != nil {
+		// A position that was not written is recovered on the next start, where
+		// an unplaced torrent sorts last by gid - the same place it is now.
+		slog.Warn("failed to record the queue position", "id", id, "error", err)
+	}
 	if req.Paused {
 		e.applyPaused(rec)
 	}
 	e.watch(rec, filtering)
+	// The new torrent may have to wait, or may be able to start immediately.
+	e.reconcileQueue()
 	slog.Info("torrent added", "id", id, "name", t.Name(),
 		"infohash", t.InfoHash().HexString(), "dir", dir, "paused", req.Paused)
 	return id, false, nil
@@ -286,12 +301,12 @@ func (e *Engine) onMetadata(rec *record, filtering bool) {
 	}
 
 	e.mu.RLock()
-	paused := rec.Paused
+	held := rec.Paused || rec.Queued
 	e.mu.RUnlock()
-	if paused {
-		// Paused means nothing is wanted. Leaving every piece at the priority
-		// anacrolix starts them on is exactly that, so there is nothing to do
-		// until Start reapplies the selection.
+	if held {
+		// Paused, or waiting in the queue: either way nothing is wanted.
+		// Leaving every piece at the priority anacrolix starts them on is
+		// exactly that, so there is nothing to do until it is let go.
 		return
 	}
 
@@ -481,6 +496,8 @@ func (e *Engine) Stop(ctx context.Context, id int64) error {
 	e.mu.Unlock()
 	e.applyPaused(rec)
 	slog.Info("torrent stopped", "id", id)
+	// Stopping frees a download slot for whatever is waiting behind it.
+	defer e.reconcileQueue()
 	return e.store.SetPaused(ctx, id, true)
 }
 
@@ -495,6 +512,10 @@ func (e *Engine) Start(ctx context.Context, id int64) error {
 	e.mu.Unlock()
 	e.resume(rec)
 	slog.Info("torrent started", "id", id)
+	// Starting may mean this torrent has to wait its turn, or that it takes a
+	// slot from nothing - reconcile decides which, and undoes the resume above
+	// if the queue is full.
+	defer e.reconcileQueue()
 	return e.store.SetPaused(ctx, id, false)
 }
 
@@ -667,6 +688,9 @@ func (e *Engine) Restore(ctx context.Context) error {
 		}
 	}
 	slog.Info("restored torrents", "count", len(saved)-len(errs), "failed", len(errs))
+	// Once, after the whole list is back: restoring ten torrents into a
+	// five-deep queue must leave five of them waiting, not all ten running.
+	e.reconcileQueue()
 	return errors.Join(errs...)
 }
 
@@ -689,9 +713,10 @@ func (e *Engine) restoreOne(ctx context.Context, s store.Torrent) error {
 		ID: s.ID, Torrent: t, Source: s.Source, SavePath: s.SavePath,
 		Paused: s.Paused, AddedAt: s.AddedAt, FinishedAt: s.FinishedAt,
 		Error: s.Error, Filtered: s.Filtered, storedFinishedAt: s.FinishedAt,
-		Labels:     s.Labels,
-		SeedLimits: s.SeedLimits,
-		ready:      make(chan struct{}),
+		Labels:        s.Labels,
+		SeedLimits:    s.SeedLimits,
+		QueuePosition: s.QueuePosition,
+		ready:         make(chan struct{}),
 	}
 	e.mu.Lock()
 	e.records[s.ID] = rec

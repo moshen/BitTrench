@@ -40,6 +40,15 @@ password = "change-me"
 
 [torrent]
 save_path = "/path/to/torrents"
+# How many torrents may download at once.
+#
+# The rest wait their turn in queue order and report Transmission's
+# download-wait status, which clients show as "Queued". Finished torrents seed
+# without holding a slot, and a torrent you stop by hand does not hold one
+# either, so this counts what is actually downloading. The order is persisted
+# and a client can reorder it. 0 disables the queue and downloads everything at
+# once.
+download_queue_size = 5
 fast_resume = true
 enable_dht = true
 # Has no effect, and is kept only so existing configuration files keep loading.

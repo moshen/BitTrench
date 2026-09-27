@@ -26,6 +26,7 @@ type cfgOpts struct {
 	seedTimeLimitSecs uint64
 	listenInTunnel    bool
 	enablePex         bool
+	downloadQueueSize uint32
 }
 
 // harness is an engine on a real tunnel with a real state database.
@@ -64,6 +65,9 @@ func newHarness(t *testing.T, customise func(*cfgOpts)) *harness {
 	cfg.Torrent.AllowedExtensions = opts.allowedExtensions
 	cfg.Torrent.ListenInTunnel = opts.listenInTunnel
 	cfg.Torrent.EnablePex = opts.enablePex
+	// Off unless a test asks for it, so every existing test keeps running every
+	// torrent it adds.
+	cfg.Torrent.DownloadQueueSize = opts.downloadQueueSize
 	cfg.Torrent.Limits.SeedRatioLimit = opts.seedRatioLimit
 	cfg.Torrent.Limits.SeedTimeLimitSecs = opts.seedTimeLimitSecs
 	// DHT off: bootstrap would sit resolving against a DNS server that

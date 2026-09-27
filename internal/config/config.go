@@ -79,6 +79,13 @@ type TorrentConfig struct {
 	// non-empty, only files whose extension is listed are downloaded.
 	// Matched case-insensitively, with or without a leading dot.
 	AllowedExtensions []string `toml:"allowed_extensions"`
+	// DownloadQueueSize is how many torrents may download at once. The rest
+	// wait in queue-position order and report Transmission's download-wait
+	// status. 0 disables the queue, so everything downloads at once.
+	//
+	// Completed torrents seed without occupying a slot, and a torrent stopped
+	// by hand does not hold one either.
+	DownloadQueueSize uint32 `toml:"download_queue_size"`
 	// ListenInTunnel accepts inbound BitTorrent connections *inside* the
 	// tunnel. No host socket is opened either way, so this is not a leak.
 	ListenInTunnel bool `toml:"listen_in_tunnel"`
@@ -135,6 +142,7 @@ func Defaults() AppConfig {
 			EnableDHT:              true,
 			DisableUPnPPortForward: true,
 			PeerConnectTimeoutSecs: 10,
+			DownloadQueueSize:      5,
 			ListenPort:             6881,
 			Limits: TorrentLimits{
 				UploadRateLimitKbps: 500,

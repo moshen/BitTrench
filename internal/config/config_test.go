@@ -35,6 +35,7 @@ func TestSampleDocumentsTheKeys(t *testing.T) {
 		"listen_in_tunnel",
 		"enable_pex",
 		"enabled",
+		"download_queue_size",
 	} {
 		if !strings.Contains(string(sample), key) {
 			t.Errorf("config.sample.toml does not document %s", key)
@@ -84,6 +85,21 @@ func TestDefaultsSurviveAnAbsentKey(t *testing.T) {
 	// An existing config that has never heard of the key must keep its API.
 	if !cfg.API.Enabled {
 		t.Error("api.enabled should default to true")
+	}
+	if got := cfg.Torrent.DownloadQueueSize; got != 5 {
+		t.Errorf("download_queue_size default = %d, want 5", got)
+	}
+}
+
+// A queue of zero is how an operator gets the pre-queue behaviour back, so an
+// explicit zero must not be replaced by the default.
+func TestDownloadQueueCanBeDisabled(t *testing.T) {
+	cfg, err := Parse("[torrent]\nsave_path = \"/tmp\"\ndownload_queue_size = 0\n")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if cfg.Torrent.DownloadQueueSize != 0 {
+		t.Errorf("explicit download_queue_size = 0 became %d", cfg.Torrent.DownloadQueueSize)
 	}
 }
 

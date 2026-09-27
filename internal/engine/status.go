@@ -17,7 +17,9 @@ import (
 type State string
 
 const (
-	StateStopped      State = "stopped"
+	StateStopped State = "stopped"
+	// StateQueued is waiting for a download slot, not stopped by anyone.
+	StateQueued       State = "queued"
 	StateInitialising State = "initializing"
 	StateDownloading  State = "downloading"
 	StateSeeding      State = "seeding"
@@ -31,8 +33,12 @@ type Status struct {
 	Name     string
 	State    State
 	Paused   bool
-	Error    string
-	SavePath string
+	// Queued reports that the download queue is holding the torrent back.
+	Queued bool
+	// QueuePosition is its place in that queue, counted from zero.
+	QueuePosition int
+	Error         string
+	SavePath      string
 
 	// TotalBytes is 0 until metadata arrives.
 	TotalBytes     int64
@@ -186,7 +192,7 @@ func (e *Engine) status(rec *record) Status {
 	t := rec.Torrent
 
 	e.mu.RLock()
-	paused, errMsg := rec.Paused, rec.Error
+	paused, queued, errMsg := rec.Paused, rec.Queued, rec.Error
 	addedAt, finishedAt := rec.AddedAt, rec.FinishedAt
 	// Cloned inside the lock: the record's slice is replaced wholesale by
 	// SetLabels, and handing a caller the live one lets it observe a write.
@@ -204,6 +210,8 @@ func (e *Engine) status(rec *record) Status {
 		// name and then to "infohash:<hex>", and never panics.
 		Name:           t.Name(),
 		Paused:         paused,
+		Queued:         queued,
+		QueuePosition:  rec.QueuePosition,
 		Error:          errMsg,
 		SavePath:       rec.SavePath,
 		CompletedBytes: t.BytesCompleted(),
@@ -234,6 +242,10 @@ func state(s Status) State {
 		return StateError
 	case s.Paused:
 		return StateStopped
+	case s.Queued:
+		// Reported before the metadata check: a torrent waiting for a slot has
+		// not been asked to fetch its info dict either.
+		return StateQueued
 	case !s.HasMetadata:
 		return StateInitialising
 	case s.MissingBytes == 0:
