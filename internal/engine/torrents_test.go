@@ -626,3 +626,57 @@ func TestSelectedBytesReportsNoFilesBeforeMetadata(t *testing.T) {
 		t.Errorf("an unknown gid reported %d selected files, want 0", files)
 	}
 }
+
+// Labels are engine-owned state that must survive a restart, like the paused
+// flag and the file selection: Sonarr and Radarr filter their queue by the
+// category they put there, so a torrent that loses its label drops out of it.
+func TestLabelsSurviveARestart(t *testing.T) {
+	mi, dataDir := buildTorrent(t, map[string]string{"movie.mkv": "data"})
+	h := newHarness(t, func(c *cfgOpts) { c.savePath = dataDir })
+	ctx := context.Background()
+
+	id, err := h.engine.Add(ctx, AddRequest{Metainfo: mi, Labels: []string{"tv-sonarr"}})
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if st, _ := h.engine.Status(id); len(st.Labels) != 1 || st.Labels[0] != "tv-sonarr" {
+		t.Fatalf("labels after add = %v, want [tv-sonarr]", st.Labels)
+	}
+
+	// Sonarr relabels on import, so the live path matters as much as the add.
+	if err := h.engine.SetLabels(ctx, id, []string{"tv-sonarr-imported"}); err != nil {
+		t.Fatalf("SetLabels: %v", err)
+	}
+
+	e := h.restart(t)
+	if err := e.Restore(ctx); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	st, ok := e.Status(id)
+	if !ok {
+		t.Fatal("the torrent did not come back")
+	}
+	if len(st.Labels) != 1 || st.Labels[0] != "tv-sonarr-imported" {
+		t.Errorf("labels after restart = %v, want [tv-sonarr-imported]", st.Labels)
+	}
+}
+
+// Status must not hand out the record's live slice; SetLabels replaces it
+// wholesale, and a caller holding the old one would otherwise observe a write.
+func TestStatusLabelsAreACopy(t *testing.T) {
+	mi, dataDir := buildTorrent(t, map[string]string{"movie.mkv": "data"})
+	h := newHarness(t, func(c *cfgOpts) { c.savePath = dataDir })
+	ctx := context.Background()
+
+	id, err := h.engine.Add(ctx, AddRequest{Metainfo: mi, Labels: []string{"original"}})
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	st, _ := h.engine.Status(id)
+	st.Labels[0] = "mutated"
+
+	again, _ := h.engine.Status(id)
+	if again.Labels[0] != "original" {
+		t.Errorf("mutating a returned label changed the engine's copy: %v", again.Labels)
+	}
+}

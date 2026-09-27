@@ -224,3 +224,76 @@ func TestDeleteCascadesToFileSelection(t *testing.T) {
 		t.Errorf("%d file_selection rows were orphaned; foreign keys are not enabled", count)
 	}
 }
+
+// Labels carry Sonarr's and Radarr's category, so they have to survive a
+// restart like any other engine-owned state.
+func TestLabelsRoundTrip(t *testing.T) {
+	s, _ := open(t)
+	ctx := context.Background()
+
+	id, err := s.Put(ctx, &Torrent{
+		InfoHash: hash(1), SavePath: "/data", AddedAt: time.Now(),
+		Labels: []string{"tv-sonarr", "readarr"},
+	})
+	if err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	labels, err := s.Labels(ctx, id)
+	if err != nil {
+		t.Fatalf("Labels: %v", err)
+	}
+	if len(labels) != 2 || labels[0] != "readarr" || labels[1] != "tv-sonarr" {
+		t.Errorf("labels = %v, want them sorted: [readarr tv-sonarr]", labels)
+	}
+
+	// The list read on startup carries them, or a restored torrent loses its
+	// category and drops out of the client's queue.
+	list, err := s.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(list) != 1 || len(list[0].Labels) != 2 {
+		t.Fatalf("List did not carry the labels: %+v", list)
+	}
+
+	// Blanks and duplicates are dropped, and a set replaces rather than merges.
+	if err := s.SetLabels(ctx, id, []string{"movies", "", "movies"}); err != nil {
+		t.Fatalf("SetLabels: %v", err)
+	}
+	labels, err = s.Labels(ctx, id)
+	if err != nil {
+		t.Fatalf("Labels: %v", err)
+	}
+	if len(labels) != 1 || labels[0] != "movies" {
+		t.Errorf("labels = %v, want [movies]", labels)
+	}
+
+	// Clearing them is a legitimate operation, not a no-op.
+	if err := s.SetLabels(ctx, id, nil); err != nil {
+		t.Fatalf("SetLabels(nil): %v", err)
+	}
+	if labels, _ = s.Labels(ctx, id); len(labels) != 0 {
+		t.Errorf("labels = %v, want none", labels)
+	}
+}
+
+// Deleting a torrent must take its labels with it, or the next torrent to be
+// assigned that gid inherits them.
+func TestDeleteRemovesLabels(t *testing.T) {
+	s, _ := open(t)
+	ctx := context.Background()
+	id, err := s.Put(ctx, &Torrent{
+		InfoHash: hash(2), SavePath: "/data", AddedAt: time.Now(),
+		Labels: []string{"tv-sonarr"},
+	})
+	if err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := s.Delete(ctx, id); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if labels, _ := s.Labels(ctx, id); len(labels) != 0 {
+		t.Errorf("labels survived the delete: %v", labels)
+	}
+}

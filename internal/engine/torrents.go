@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -41,6 +42,10 @@ type record struct {
 	// Filtered records that the allow-list has been applied, so a restored
 	// torrent keeps its selection instead of being filtered again.
 	Filtered bool
+	// Labels are the Transmission labels. Sonarr and Radarr carry their
+	// category in them, and both filter their queue by it, so they are
+	// engine-owned state that has to survive a restart.
+	Labels []string
 
 	// storedFinishedAt is what the database currently holds, so the monitor
 	// writes only when the value actually changes rather than every tick.
@@ -62,6 +67,8 @@ type AddRequest struct {
 	DownloadDir string
 	// Paused starts the torrent stopped.
 	Paused bool
+	// Labels are the Transmission labels to record against the torrent.
+	Labels []string
 }
 
 // Add adds a torrent and returns its gid.
@@ -103,6 +110,7 @@ func (e *Engine) Add(ctx context.Context, req AddRequest) (int64, error) {
 		SavePath: dir,
 		Paused:   req.Paused,
 		AddedAt:  time.Now(),
+		Labels:   req.Labels,
 	})
 	if err != nil {
 		return 0, err
@@ -122,6 +130,7 @@ func (e *Engine) Add(ctx context.Context, req AddRequest) (int64, error) {
 		SavePath: dir,
 		Paused:   req.Paused,
 		AddedAt:  time.Now(),
+		Labels:   slices.Clone(req.Labels),
 		ready:    make(chan struct{}),
 	}
 	e.mu.Lock()
@@ -383,6 +392,31 @@ func applySelection(t *torrent.Torrent, selection []bool) error {
 	return nil
 }
 
+// SetLabels replaces a torrent's labels and persists them. Sonarr relabels a
+// torrent when it imports one, so this is a live path and not a one-off at add
+// time.
+func (e *Engine) SetLabels(ctx context.Context, id int64, labels []string) error {
+	rec := e.record(id)
+	if rec == nil {
+		return fmt.Errorf("no torrent with id %d", id)
+	}
+	if err := e.store.SetLabels(ctx, id, labels); err != nil {
+		return err
+	}
+	// Read back rather than trusting the argument: the store drops blanks and
+	// duplicates and sorts what is left, and a client polling torrent-get
+	// straight afterwards must see exactly what was kept.
+	stored, err := e.store.Labels(ctx, id)
+	if err != nil {
+		return err
+	}
+	e.mu.Lock()
+	rec.Labels = stored
+	e.mu.Unlock()
+	slog.Info("torrent labels set", "id", id, "labels", stored)
+	return nil
+}
+
 // SetFileSelection applies and persists a per-file selection.
 func (e *Engine) SetFileSelection(ctx context.Context, id int64, selection []bool) error {
 	rec := e.record(id)
@@ -618,7 +652,8 @@ func (e *Engine) restoreOne(ctx context.Context, s store.Torrent) error {
 		ID: s.ID, Torrent: t, Source: s.Source, SavePath: s.SavePath,
 		Paused: s.Paused, AddedAt: s.AddedAt, FinishedAt: s.FinishedAt,
 		Error: s.Error, Filtered: s.Filtered, storedFinishedAt: s.FinishedAt,
-		ready: make(chan struct{}),
+		Labels: s.Labels,
+		ready:  make(chan struct{}),
 	}
 	e.mu.Lock()
 	e.records[s.ID] = rec

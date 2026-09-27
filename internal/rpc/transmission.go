@@ -257,10 +257,11 @@ func (h *Handler) sessionStats() map[string]any {
 }
 
 type addArgs struct {
-	Filename    string `json:"filename"`
-	Metainfo    string `json:"metainfo"`
-	DownloadDir string `json:"download-dir"`
-	Paused      bool   `json:"paused"`
+	Filename    string   `json:"filename"`
+	Metainfo    string   `json:"metainfo"`
+	DownloadDir string   `json:"download-dir"`
+	Paused      bool     `json:"paused"`
+	Labels      []string `json:"labels"`
 }
 
 func (h *Handler) torrentAdd(ctx context.Context, raw json.RawMessage) (any, error) {
@@ -271,7 +272,14 @@ func (h *Handler) torrentAdd(ctx context.Context, raw json.RawMessage) (any, err
 		}
 	}
 
-	req := engine.AddRequest{DownloadDir: args.DownloadDir, Paused: args.Paused}
+	// Sonarr and Radarr both send their category as a label whenever the client
+	// reports version >= 4.0, which we do. Dropping it left them falling back
+	// to matching categories by directory.
+	req := engine.AddRequest{
+		DownloadDir: args.DownloadDir,
+		Paused:      args.Paused,
+		Labels:      args.Labels,
+	}
 	switch {
 	case args.Metainfo != "":
 		blob, err := base64.StdEncoding.DecodeString(args.Metainfo)
@@ -488,6 +496,11 @@ func (h *Handler) torrentFields(s engine.Status, files []engine.File) map[string
 		addedDate = s.AddedAt.Unix()
 	}
 
+	labels := s.Labels
+	if labels == nil {
+		labels = []string{}
+	}
+
 	fileList := make([]map[string]any, 0, len(files))
 	wanted := make([]int, 0, len(files))
 	priorities := make([]int, 0, len(files))
@@ -546,6 +559,9 @@ func (h *Handler) torrentFields(s engine.Status, files []engine.File) map[string
 		"priorities":  priorities,
 		"error":       errCode,
 		"errorString": s.Error,
+		// Always an array, never null: a client that filters on it should see
+		// "no labels", and Transmission itself sends [].
+		"labels": labels,
 	}
 }
 

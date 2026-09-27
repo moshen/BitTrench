@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"slices"
 	"time"
 
 	"github.com/anacrolix/torrent"
@@ -52,6 +53,9 @@ type Status struct {
 	// Every metadata-dependent field above is zero until it is true, and
 	// Files() must not be called: it dereferences a nil pointer.
 	HasMetadata bool
+	// Labels are the Transmission labels, copied out of the record - Sonarr
+	// and Radarr keep their category here.
+	Labels []string
 }
 
 // Ratio is uploaded over total, or 0 when the total is unknown.
@@ -179,6 +183,9 @@ func (e *Engine) status(rec *record) Status {
 	e.mu.RLock()
 	paused, errMsg := rec.Paused, rec.Error
 	addedAt, finishedAt := rec.AddedAt, rec.FinishedAt
+	// Cloned inside the lock: the record's slice is replaced wholesale by
+	// SetLabels, and handing a caller the live one lets it observe a write.
+	labels := slices.Clone(rec.Labels)
 	e.mu.RUnlock()
 
 	stats := t.Stats()
@@ -203,6 +210,7 @@ func (e *Engine) status(rec *record) Status {
 		AddedAt:        addedAt,
 		FinishedAt:     finishedAt,
 		HasMetadata:    t.Info() != nil,
+		Labels:         labels,
 	}
 	if s.HasMetadata {
 		s.TotalBytes = t.Length()

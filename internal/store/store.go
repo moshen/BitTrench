@@ -26,6 +26,12 @@ import (
 // (changes on removal): Sonarr and Radarr require a stable integer id and will
 // lose track of a download whose id moves.
 //
+// Labels live in their own table rather than in a column on `torrents`: a
+// label is a set member, and a new table keeps every statement here a
+// CREATE ... IF NOT EXISTS, so an existing state database opens without a
+// migration step. ON DELETE CASCADE plus the foreign_keys pragma means
+// removing a torrent takes its labels with it.
+//
 // `have` and `known` are the piece-completion bitfields, ceil(piece_count/8)
 // bytes each. Two of them, because Completion carries Ok *and* Complete and
 // they mean different things - see completion.go.
@@ -45,6 +51,11 @@ CREATE TABLE IF NOT EXISTS torrents (
   piece_count  INTEGER NOT NULL DEFAULT 0,
   have         BLOB,
   known        BLOB
+);
+CREATE TABLE IF NOT EXISTS labels (
+  torrent_id  INTEGER NOT NULL REFERENCES torrents(id) ON DELETE CASCADE,
+  label       TEXT    NOT NULL,
+  PRIMARY KEY (torrent_id, label)
 );
 CREATE TABLE IF NOT EXISTS file_selection (
   torrent_id  INTEGER NOT NULL REFERENCES torrents(id) ON DELETE CASCADE,
@@ -77,6 +88,9 @@ type Torrent struct {
 	// so a restored torrent keeps its persisted selection and is exempt from
 	// being filtered again.
 	Filtered bool
+	// Labels are the Transmission labels, which Sonarr and Radarr use to carry
+	// their category. Sorted, so a client polling twice sees the same order.
+	Labels []string
 }
 
 // Store is the open database.
@@ -125,6 +139,11 @@ func (s *Store) Put(ctx context.Context, t *Torrent) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("failed to read the assigned torrent id: %w", err)
 	}
+	if len(t.Labels) > 0 {
+		if err := s.SetLabels(ctx, id, t.Labels); err != nil {
+			return 0, err
+		}
+	}
 	return id, nil
 }
 
@@ -169,7 +188,46 @@ func (s *Store) List(ctx context.Context) ([]Torrent, error) {
 		}
 		out = append(out, t)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// One query for every torrent's labels rather than one per torrent: the
+	// list is read on every start, and Restore is already the slowest part of
+	// it.
+	if err := s.attachLabels(ctx, out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// attachLabels fills in Labels across a torrent list in one query.
+func (s *Store) attachLabels(ctx context.Context, torrents []Torrent) error {
+	if len(torrents) == 0 {
+		return nil
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT torrent_id, label FROM labels ORDER BY torrent_id, label`)
+	if err != nil {
+		return fmt.Errorf("failed to read the torrent labels: %w", err)
+	}
+	defer rows.Close()
+
+	byID := make(map[int64][]string)
+	for rows.Next() {
+		var id int64
+		var label string
+		if err := rows.Scan(&id, &label); err != nil {
+			return fmt.Errorf("failed to read a label row: %w", err)
+		}
+		byID[id] = append(byID[id], label)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for i := range torrents {
+		torrents[i].Labels = byID[torrents[i].ID]
+	}
+	return nil
 }
 
 // SetPaused records the paused flag. anacrolix/torrent has no pause, so this
@@ -269,6 +327,55 @@ func (s *Store) FileSelection(ctx context.Context, id int64) ([]bool, error) {
 			out = append(out, false)
 		}
 		out[index] = selected != 0
+	}
+	return out, rows.Err()
+}
+
+// SetLabels replaces a torrent's labels. Duplicates and blanks are dropped, so
+// what comes back out of Labels is what a client can meaningfully match on.
+func (s *Store) SetLabels(ctx context.Context, id int64, labels []string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to record the torrent labels: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM labels WHERE torrent_id = ?`, id); err != nil {
+		return fmt.Errorf("failed to clear the previous torrent labels: %w", err)
+	}
+	stmt, err := tx.PrepareContext(ctx,
+		`INSERT OR IGNORE INTO labels (torrent_id, label) VALUES (?, ?)`)
+	if err != nil {
+		return fmt.Errorf("failed to record the torrent labels: %w", err)
+	}
+	defer stmt.Close()
+	for _, label := range labels {
+		if label == "" {
+			continue
+		}
+		if _, err := stmt.ExecContext(ctx, id, label); err != nil {
+			return fmt.Errorf("failed to record the label %q: %w", label, err)
+		}
+	}
+	return tx.Commit()
+}
+
+// Labels returns a torrent's labels, sorted, or nil when it has none.
+func (s *Store) Labels(ctx context.Context, id int64) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT label FROM labels WHERE torrent_id = ? ORDER BY label`, id)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read the torrent labels: %w", err)
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var label string
+		if err := rows.Scan(&label); err != nil {
+			return nil, fmt.Errorf("failed to read a label row: %w", err)
+		}
+		out = append(out, label)
 	}
 	return out, rows.Err()
 }

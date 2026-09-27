@@ -856,3 +856,47 @@ func TestPreMetadataFallsBackToTheTorrentFigures(t *testing.T) {
 		t.Errorf("status = %v, want check-wait", got["status"])
 	}
 }
+
+// Both clients send their category as a label on torrent-add whenever the
+// reported version is >= 4.0, which ours is. Dropping it left them matching
+// categories by directory instead.
+func TestTorrentAddRecordsLabels(t *testing.T) {
+	f := newFakeEngine()
+	h := newHandler(t, f, nil)
+
+	if _, result := call(t, h, "torrent-add", map[string]any{
+		"filename": "magnet:?xt=urn:btih:abc",
+		"labels":   []string{"tv-sonarr"},
+	}); result != "success" {
+		t.Fatalf("torrent-add: %s", result)
+	}
+	if len(f.added) != 1 {
+		t.Fatalf("expected one add, got %d", len(f.added))
+	}
+	if got := f.added[0].Labels; len(got) != 1 || got[0] != "tv-sonarr" {
+		t.Errorf("labels = %v, want [tv-sonarr]", got)
+	}
+}
+
+// torrent-get must report labels, and as an array even when there are none:
+// Sonarr gates its label filter on the collection being non-empty, and a null
+// would be a deserialisation surprise for no benefit.
+func TestTorrentGetReportsLabels(t *testing.T) {
+	f := newFakeEngine()
+	f.torrents = []engine.Status{
+		{ID: 1, Name: "labelled", Labels: []string{"tv-sonarr"}},
+		{ID: 2, Name: "bare"},
+	}
+	args, _ := call(t, newHandler(t, f, nil), "torrent-get",
+		map[string]any{"fields": []string{"id", "labels"}})
+	list := args["torrents"].([]any)
+
+	labelled := list[0].(map[string]any)["labels"]
+	if got, ok := labelled.([]any); !ok || len(got) != 1 || got[0] != "tv-sonarr" {
+		t.Errorf("labels = %#v, want [tv-sonarr]", labelled)
+	}
+	bare := list[1].(map[string]any)["labels"]
+	if got, ok := bare.([]any); !ok || len(got) != 0 {
+		t.Errorf("a torrent with no labels reported %#v, want []", bare)
+	}
+}
