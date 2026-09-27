@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -172,5 +174,60 @@ func TestBasicAuthGuardsTheUIAndAPI(t *testing.T) {
 		if resp.StatusCode != http.StatusOK {
 			t.Errorf("authenticated GET %s = %d, want 200", path, resp.StatusCode)
 		}
+	}
+}
+
+// Every asset the page asks for must be served, with a media type a browser
+// will accept.
+//
+// The references are read out of index.html rather than listed here, because
+// the bug this pins was a mismatch between the two: the page asked for
+// /web/styles.css and /web/app.js while the assets were mounted at the root, so
+// both 404'd. A 404 carries text/plain and nosniff, which is what a browser
+// reports as a MIME type mismatch, and the UI rendered unstyled and inert.
+func TestEveryAssetThePageReferencesIsServed(t *testing.T) {
+	_, base := start(t, nil)
+
+	resp, err := http.Get(base + "/")
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	defer resp.Body.Close()
+	page, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reading the page: %v", err)
+	}
+
+	refs := regexp.MustCompile(`(?:href|src)="(/[^"]+)"`).FindAllStringSubmatch(string(page), -1)
+	if len(refs) < 3 {
+		t.Fatalf("found %d local references in index.html, expected the stylesheet, "+
+			"the script and the favicon at least", len(refs))
+	}
+
+	wantType := map[string]string{
+		".css": "text/css",
+		".js":  "text/javascript",
+		".svg": "image/svg+xml",
+	}
+	for _, ref := range refs {
+		path := ref[1]
+		t.Run(path, func(t *testing.T) {
+			resp, err := http.Get(base + path)
+			if err != nil {
+				t.Fatalf("GET %s: %v", path, err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("%s returned %d, so the page cannot load it", path, resp.StatusCode)
+			}
+			want, ok := wantType[strings.ToLower(filepath.Ext(path))]
+			if !ok {
+				return
+			}
+			if got := resp.Header.Get("Content-Type"); !strings.HasPrefix(got, want) {
+				t.Errorf("%s served as %q, want %q: a browser with nosniff refuses it",
+					path, got, want)
+			}
+		})
 	}
 }
