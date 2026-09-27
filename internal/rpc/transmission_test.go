@@ -43,14 +43,21 @@ type fakeEngine struct {
 	started  map[int64]bool
 	addErr   error
 	down, up float64
+	// labelsSet and selectionSet record what torrent-set pushed down, so the
+	// tests assert on the engine call rather than on a round-trip.
+	labelsSet    map[int64][]string
+	selectionSet map[int64][]bool
+	setLabelsErr error
 }
 
 func newFakeEngine() *fakeEngine {
 	return &fakeEngine{
-		files:   map[int64][]engine.File{},
-		removed: map[int64]bool{},
-		stopped: map[int64]bool{},
-		started: map[int64]bool{},
+		files:        map[int64][]engine.File{},
+		removed:      map[int64]bool{},
+		stopped:      map[int64]bool{},
+		started:      map[int64]bool{},
+		labelsSet:    map[int64][]string{},
+		selectionSet: map[int64][]bool{},
 	}
 }
 
@@ -114,6 +121,29 @@ func (f *fakeEngine) Remove(_ context.Context, id int64, deleteData bool) error 
 }
 
 func (f *fakeEngine) SessionRates() (float64, float64) { return f.down, f.up }
+
+func (f *fakeEngine) SetLabels(_ context.Context, id int64, labels []string) error {
+	if f.setLabelsErr != nil {
+		return f.setLabelsErr
+	}
+	f.labelsSet[id] = labels
+	for i := range f.torrents {
+		if f.torrents[i].ID == id {
+			f.torrents[i].Labels = labels
+		}
+	}
+	return nil
+}
+
+func (f *fakeEngine) SetFileSelection(_ context.Context, id int64, selection []bool) error {
+	f.selectionSet[id] = selection
+	for i := range f.files[id] {
+		if i < len(selection) {
+			f.files[id][i].Selected = selection[i]
+		}
+	}
+	return nil
+}
 
 func testConfig() *config.AppConfig {
 	cfg := config.Defaults()
@@ -898,5 +928,140 @@ func TestTorrentGetReportsLabels(t *testing.T) {
 	bare := list[1].(map[string]any)["labels"]
 	if got, ok := bare.([]any); !ok || len(got) != 0 {
 		t.Errorf("a torrent with no labels reported %#v, want []", bare)
+	}
+}
+
+// torrent-set is what Sonarr calls to relabel a torrent on import. Answering
+// "method not implemented" made its ProcessRequest raise a
+// TransmissionException, turning a finished download into a reported failure.
+func TestTorrentSetLabels(t *testing.T) {
+	f := newFakeEngine()
+	f.torrents = []engine.Status{{ID: 1, Labels: []string{"tv-sonarr"}}}
+	h := newHandler(t, f, nil)
+
+	_, result := call(t, h, "torrent-set", map[string]any{
+		"ids":    []any{1},
+		"labels": []string{"tv-sonarr-imported"},
+	})
+	if result != "success" {
+		t.Fatalf("torrent-set returned %q, want success", result)
+	}
+	if got := f.labelsSet[1]; len(got) != 1 || got[0] != "tv-sonarr-imported" {
+		t.Errorf("labels pushed down = %v, want [tv-sonarr-imported]", got)
+	}
+}
+
+// An absent key must leave a setting alone; an empty one must clear it. Without
+// the distinction, any torrent-set would wipe the labels.
+func TestTorrentSetDistinguishesAbsentFromEmpty(t *testing.T) {
+	f := newFakeEngine()
+	f.torrents = []engine.Status{{ID: 1, Labels: []string{"keep"}}}
+	h := newHandler(t, f, nil)
+
+	if _, result := call(t, h, "torrent-set", map[string]any{"ids": []any{1}}); result != "success" {
+		t.Fatalf("torrent-set: %s", result)
+	}
+	if _, touched := f.labelsSet[1]; touched {
+		t.Error("a torrent-set with no labels key must not touch the labels")
+	}
+
+	if _, result := call(t, h, "torrent-set", map[string]any{
+		"ids": []any{1}, "labels": []string{},
+	}); result != "success" {
+		t.Fatalf("torrent-set: %s", result)
+	}
+	if got, touched := f.labelsSet[1]; !touched || len(got) != 0 {
+		t.Errorf("labels = %v, want an explicit clear", got)
+	}
+}
+
+// files-wanted and files-unwanted are edits to the current selection, and the
+// engine takes a whole selection, so the current one is the starting point.
+func TestTorrentSetFileWishes(t *testing.T) {
+	newEngine := func() *fakeEngine {
+		f := newFakeEngine()
+		f.torrents = []engine.Status{{ID: 1}}
+		f.files[1] = []engine.File{
+			{Index: 0, Path: "a.mkv", Length: 10, Selected: true},
+			{Index: 1, Path: "b.nfo", Length: 10, Selected: true},
+			{Index: 2, Path: "c.iso", Length: 10, Selected: false},
+		}
+		return f
+	}
+
+	tests := []struct {
+		name string
+		args map[string]any
+		want []bool
+	}{
+		{
+			name: "unwanted edits only the named index",
+			args: map[string]any{"ids": []any{1}, "files-unwanted": []int{1}},
+			want: []bool{true, false, false},
+		},
+		{
+			name: "wanted re-selects a deselected file",
+			args: map[string]any{"ids": []any{1}, "files-wanted": []int{2}},
+			want: []bool{true, true, true},
+		},
+		{
+			name: "an empty list means every file",
+			args: map[string]any{"ids": []any{1}, "files-unwanted": []int{}},
+			want: []bool{false, false, false},
+		},
+		{
+			name: "wanted wins over unwanted for the same index",
+			args: map[string]any{"ids": []any{1}, "files-unwanted": []int{0}, "files-wanted": []int{0}},
+			want: []bool{true, true, false},
+		},
+		{
+			name: "an out-of-range index is skipped, not an error",
+			args: map[string]any{"ids": []any{1}, "files-unwanted": []int{99, -1, 0}},
+			want: []bool{false, true, false},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newEngine()
+			_, result := call(t, newHandler(t, f, nil), "torrent-set", tc.args)
+			if result != "success" {
+				t.Fatalf("torrent-set returned %q", result)
+			}
+			got := f.selectionSet[1]
+			if len(got) != len(tc.want) {
+				t.Fatalf("selection = %v, want %v", got, tc.want)
+			}
+			for i := range tc.want {
+				if got[i] != tc.want[i] {
+					t.Errorf("selection = %v, want %v", got, tc.want)
+					break
+				}
+			}
+		})
+	}
+}
+
+// Before metadata there is no file list to index into. Silently dropping the
+// instruction would leave the client believing it had applied.
+func TestTorrentSetFileWishesNeedMetadata(t *testing.T) {
+	f := newFakeEngine()
+	f.torrents = []engine.Status{{ID: 1, Name: "infohash:abc"}}
+	_, result := call(t, newHandler(t, f, nil), "torrent-set",
+		map[string]any{"ids": []any{1}, "files-wanted": []int{0}})
+	if result == "success" {
+		t.Error("expected a failure result when the torrent has no file list")
+	}
+}
+
+// With no ids, torrent-set applies to every torrent, like every other method.
+func TestTorrentSetWithNoIDsAppliesToAll(t *testing.T) {
+	f := newFakeEngine()
+	f.torrents = []engine.Status{{ID: 1}, {ID: 2}}
+	if _, result := call(t, newHandler(t, f, nil), "torrent-set",
+		map[string]any{"labels": []string{"all"}}); result != "success" {
+		t.Fatalf("torrent-set: %s", result)
+	}
+	if len(f.labelsSet) != 2 {
+		t.Errorf("labels applied to %d torrents, want 2", len(f.labelsSet))
 	}
 }

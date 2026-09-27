@@ -68,6 +68,8 @@ type Torrents interface {
 	List() []engine.Status
 	Files(id int64) []engine.File
 	SelectedBytes(id int64) (completed, total int64, files int)
+	SetLabels(ctx context.Context, id int64, labels []string) error
+	SetFileSelection(ctx context.Context, id int64, selection []bool) error
 	Start(ctx context.Context, id int64) error
 	Stop(ctx context.Context, id int64) error
 	Remove(ctx context.Context, id int64, deleteData bool) error
@@ -162,6 +164,8 @@ func (h *Handler) dispatch(ctx context.Context, req request) (any, error) {
 		return h.torrentAdd(ctx, req.Arguments)
 	case "torrent-get":
 		return h.torrentGet(req.Arguments)
+	case "torrent-set":
+		return h.torrentSet(ctx, req.Arguments)
 	case "torrent-remove":
 		return h.torrentRemove(ctx, req.Arguments)
 	case "torrent-stop":
@@ -341,6 +345,98 @@ func (h *Handler) torrentGet(raw json.RawMessage) (any, error) {
 		torrents = append(torrents, project(h.torrentFields(s, files), args.Fields))
 	}
 	return map[string]any{"torrents": torrents}, nil
+}
+
+type setArgs struct {
+	IDs           json.RawMessage `json:"ids"`
+	Labels        *[]string       `json:"labels"`
+	FilesWanted   *[]int          `json:"files-wanted"`
+	FilesUnwanted *[]int          `json:"files-unwanted"`
+}
+
+// torrentSet applies the mutable per-torrent settings a client can change.
+//
+// Sonarr calls this twice over a download's life: once after adding, to push
+// its seed criteria down, and again on import, to swap the category label. Both
+// used to answer "method not implemented", which its ProcessRequest raises as a
+// TransmissionException - so a configured seed limit or imported category turned
+// a working download into a reported failure.
+//
+// Every argument is a pointer so an absent key is distinguishable from an empty
+// one: `labels: []` clears the labels, while omitting the key leaves them
+// alone. Unknown arguments are ignored, as Transmission ignores them.
+func (h *Handler) torrentSet(ctx context.Context, raw json.RawMessage) (any, error) {
+	var args setArgs
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &args); err != nil {
+			return nil, fmt.Errorf("invalid arguments: %w", err)
+		}
+	}
+	ids, filtered, err := parseIDs(args.IDs)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, s := range h.engine.List() {
+		if filtered && !ids[s.ID] {
+			continue
+		}
+		if args.Labels != nil {
+			if err := h.engine.SetLabels(ctx, s.ID, *args.Labels); err != nil {
+				return nil, err
+			}
+		}
+		if args.FilesWanted == nil && args.FilesUnwanted == nil {
+			continue
+		}
+		if err := h.applyFileWishes(ctx, s.ID, args); err != nil {
+			return nil, err
+		}
+	}
+	return nil, nil
+}
+
+// applyFileWishes turns files-wanted/files-unwanted index lists into the
+// engine's whole-selection form.
+//
+// The lists are edits to the current selection, not a replacement for it, so
+// the current one is the starting point. An empty list means every file, which
+// is Transmission's own reading. Indices outside the file list are skipped
+// rather than rejected, also matching it.
+func (h *Handler) applyFileWishes(ctx context.Context, id int64, args setArgs) error {
+	files := h.engine.Files(id)
+	if len(files) == 0 {
+		// No metadata yet, so there is no file list to index into. Refusing is
+		// better than silently dropping the instruction.
+		return fmt.Errorf("torrent %d has no file list yet", id)
+	}
+	selection := make([]bool, len(files))
+	for i, f := range files {
+		selection[i] = f.Selected
+	}
+
+	apply := func(indices *[]int, want bool) {
+		if indices == nil {
+			return
+		}
+		if len(*indices) == 0 {
+			for i := range selection {
+				selection[i] = want
+			}
+			return
+		}
+		for _, i := range *indices {
+			if i >= 0 && i < len(selection) {
+				selection[i] = want
+			}
+		}
+	}
+	// Unwanted first, so an index named in both ends up wanted - the same
+	// precedence a client gets from Transmission.
+	apply(args.FilesUnwanted, false)
+	apply(args.FilesWanted, true)
+
+	return h.engine.SetFileSelection(ctx, id, selection)
 }
 
 type removeArgs struct {
