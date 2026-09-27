@@ -1387,3 +1387,46 @@ func TestSessionGetAdvertisesTheQueue(t *testing.T) {
 		t.Errorf("a zero queue reported enabled = %v, want false", args["download-queue-enabled"])
 	}
 }
+
+// Transmission's torrent-start respects the queue and torrent-start-now jumps
+// it. Moving to the top rather than ignoring the depth is what keeps the
+// operator's limit true: starting one torrent now displaces the one that was
+// last in the running set.
+func TestTorrentStartNowJumpsTheQueue(t *testing.T) {
+	f := newFakeEngine()
+	f.torrents = []engine.Status{
+		{ID: 1, QueuePosition: 0},
+		{ID: 2, QueuePosition: 1, State: engine.StateQueued, Queued: true},
+	}
+	h := newHandler(t, f, nil)
+
+	if _, result := call(t, h, "torrent-start-now", map[string]any{"ids": []any{2}}); result != "success" {
+		t.Fatalf("torrent-start-now returned %q, want success", result)
+	}
+	if len(f.moves) != 1 || f.moves[0].ID != 2 || f.moves[0].Move != engine.MoveTop {
+		t.Errorf("moves = %+v, want torrent 2 to the top", f.moves)
+	}
+	if !f.started[2] {
+		t.Error("torrent-start-now did not start the torrent")
+	}
+	if f.started[1] {
+		t.Error("torrent-start-now touched a torrent it was not given")
+	}
+}
+
+// Plain torrent-start must not reorder anything: that is the difference between
+// the two methods.
+func TestTorrentStartDoesNotReorderTheQueue(t *testing.T) {
+	f := newFakeEngine()
+	f.torrents = []engine.Status{{ID: 1, QueuePosition: 3}}
+	if _, result := call(t, newHandler(t, f, nil), "torrent-start",
+		map[string]any{"ids": []any{1}}); result != "success" {
+		t.Fatalf("torrent-start: %s", result)
+	}
+	if len(f.moves) != 0 {
+		t.Errorf("torrent-start moved things in the queue: %+v", f.moves)
+	}
+	if !f.started[1] {
+		t.Error("torrent-start did not start the torrent")
+	}
+}

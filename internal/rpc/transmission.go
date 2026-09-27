@@ -187,6 +187,8 @@ func (h *Handler) dispatch(ctx context.Context, req request) (any, error) {
 		return h.torrentSetPaused(ctx, req.Arguments, true)
 	case "torrent-start":
 		return h.torrentSetPaused(ctx, req.Arguments, false)
+	case "torrent-start-now":
+		return h.torrentStartNow(ctx, req.Arguments)
 	default:
 		// Transmission's convention: not an HTTP error.
 		return nil, fmt.Errorf("method not implemented: %s", req.Method)
@@ -568,6 +570,20 @@ func (h *Handler) torrentRemove(ctx context.Context, raw json.RawMessage) (any, 
 		}
 	}
 	return nil, nil
+}
+
+// torrentStartNow starts torrents ahead of the queue.
+//
+// Transmission's own semantics: torrent-start respects the queue, and
+// torrent-start-now jumps it. Moving to the top rather than ignoring the queue
+// outright is what makes that true here - the depth still holds, so starting one
+// torrent now displaces the torrent that was last in the running set rather than
+// running one more than the operator allowed.
+func (h *Handler) torrentStartNow(ctx context.Context, raw json.RawMessage) (any, error) {
+	if _, err := h.queueMove(ctx, raw, engine.MoveTop); err != nil {
+		return nil, err
+	}
+	return h.torrentSetPaused(ctx, raw, false)
 }
 
 func (h *Handler) torrentSetPaused(ctx context.Context, raw json.RawMessage, paused bool) (any, error) {
