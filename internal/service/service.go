@@ -34,9 +34,9 @@ type InstallOptions struct {
 	ConfigPath string
 }
 
-// UninstallOptions are the knobs `uninstall` accepts.
+// UninstallOptions are the knobs `uninstall` accepts. There is no name: the
+// only service this removes is DefaultName, the only one install registers.
 type UninstallOptions struct {
-	Name string
 	// Stop stops the service first if it is running.
 	Stop bool
 }

@@ -52,7 +52,7 @@ usage:
                                                re-register it if it is already
                                                installed, pointing it at the
                                                running binary
-  bittrench uninstall [-name N] [-no-stop] remove the Windows service
+  bittrench uninstall [-no-stop]           remove the Windows service
   bittrench [-config PATH] serve           run under the Windows SCM
                                                (invoked by the SCM itself)
 
@@ -78,9 +78,9 @@ func main() {
 
 	absConfig, configErr := resolveConfigPath(*configPath)
 	// Not finding a config is only fatal here for the commands that read one and
-	// have no flags of their own. uninstall takes a service name rather than a
-	// configuration, and install and get parse their own flags first so that
-	// `install -h` still works on a machine with no config at all.
+	// have no flags of their own. uninstall reads no configuration at all, and
+	// install and get parse their own flags first so that `install -h` still
+	// works on a machine with no config at all.
 	switch flag.Arg(0) {
 	case "uninstall", "install", "get":
 	default:
@@ -459,10 +459,10 @@ func serveUnderSCM(configPath string) error {
 // installService registers the service, or re-registers it if it is already
 // there.
 //
-// There is deliberately no -name: one machine, one daemon. Two services sharing
-// this binary would share its configuration, and with it one state database and
-// one API port. uninstall still takes a name, so a stray from an older version
-// can be removed.
+// There is deliberately no -name, on either install or uninstall: one machine,
+// one daemon. Two services sharing this binary would share its configuration,
+// and with it one state database and one API port, so there is only ever the one
+// name to install or remove.
 func installService(configPath string, configErr error, args []string) error {
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
 	display := fs.String("display-name", service.DefaultDisplayName, "name shown in services.msc")
@@ -504,15 +504,14 @@ func installService(configPath string, configErr error, args []string) error {
 
 func uninstallService(args []string) error {
 	fs := flag.NewFlagSet("uninstall", flag.ContinueOnError)
-	name := fs.String("name", service.DefaultName, "service name to remove")
 	noStop := fs.Bool("no-stop", false, "do not stop the service before removing it")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if err := service.Uninstall(service.UninstallOptions{Name: *name, Stop: !*noStop}); err != nil {
+	if err := service.Uninstall(service.UninstallOptions{Stop: !*noStop}); err != nil {
 		return err
 	}
-	fmt.Printf("removed the service %q\n", *name)
+	fmt.Printf("removed the service %q\n", service.DefaultName)
 	return nil
 }
 

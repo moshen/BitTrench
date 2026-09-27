@@ -142,9 +142,8 @@ func refuseStrayInstalls(m *mgr.Mgr, exe, name string) error {
 			continue
 		}
 		return fmt.Errorf("the service %q already runs this binary (%s): "+
-			"two services sharing it would share one state database and one API "+
-			"port, so remove it first with `bittrench uninstall -name %s`",
-			other, exe, other)
+			"two services sharing it would share one state database and one API port",
+			other, exe)
 	}
 	return nil
 }
@@ -156,7 +155,7 @@ func Uninstall(opts UninstallOptions) error {
 		return fmt.Errorf("couldn't connect to the local Service Control Manager: %w", err)
 	}
 	defer m.Disconnect()
-	return remove(m, opts.Name, opts.Stop)
+	return remove(m, DefaultName, opts.Stop)
 }
 
 // remove stops and deletes a service. Shared by uninstall and by the reinstall
