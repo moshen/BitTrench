@@ -41,10 +41,22 @@ type Status struct {
 	SavePath      string
 
 	// TotalBytes is 0 until metadata arrives.
+	// TotalBytes, CompletedBytes and MissingBytes are the whole torrent,
+	// including files it does not want.
 	TotalBytes     int64
 	CompletedBytes int64
 	MissingBytes   int64
-	UploadedBytes  int64
+	// SizeWhenDone is the total of the files the torrent *wants*, and
+	// LeftUntilDone how much of that has yet to arrive. These are the figures
+	// that answer "is it done" and "how far along is it": MissingBytes counts
+	// every incomplete piece whether it is wanted or not, so it never reaches
+	// zero once any file is deselected - by allowed_extensions or by hand -
+	// and both progress and completion measured against it stall for good.
+	//
+	// With nothing deselected they are TotalBytes and MissingBytes.
+	SizeWhenDone  int64
+	LeftUntilDone int64
+	UploadedBytes int64
 
 	DownloadRate float64 // bytes/second, from the sampler
 	UploadRate   float64
@@ -77,14 +89,24 @@ func (s Status) Ratio() float64 {
 	return float64(s.UploadedBytes) / float64(s.TotalBytes)
 }
 
-// ETA is how long the remaining bytes will take at the current rate, or -1
-// when that cannot be answered - which is what Transmission clients expect
-// for "unknown".
+// Complete reports that every file the torrent wants has arrived.
+//
+// This is the daemon's one definition of a finished download: the state
+// machine, the seed monitor, the download queue and the Transmission RPC layer
+// all ask it, rather than each deciding for itself.
+func (s Status) Complete() bool {
+	return s.HasMetadata && s.LeftUntilDone == 0
+}
+
+// ETA is how long the wanted bytes will take at the current rate, or -1 when
+// that cannot be answered - which is what Transmission clients expect for
+// "unknown". Against the wanted bytes, not the torrent's: the bytes it will
+// never ask for would otherwise keep the estimate alive forever.
 func (s Status) ETA() time.Duration {
-	if s.MissingBytes <= 0 || s.DownloadRate <= 0 {
+	if s.LeftUntilDone <= 0 || s.DownloadRate <= 0 {
 		return -1
 	}
-	return time.Duration(float64(s.MissingBytes)/s.DownloadRate) * time.Second
+	return time.Duration(float64(s.LeftUntilDone)/s.DownloadRate) * time.Second
 }
 
 // Status returns one torrent's status, or false if the gid is unknown.
@@ -150,30 +172,6 @@ func (e *Engine) Files(id int64) []File {
 	return out
 }
 
-// SelectedBytes returns how many bytes of the files a torrent actually wants
-// are complete, out of how many, and how many files are selected.
-//
-// This, not Status, is the honest progress and completion signal for a torrent
-// whose files are not all selected. Torrent.BytesMissing counts every
-// incomplete piece whether it is wanted or not, so an extension allow-list -
-// or any deselected file - leaves MissingBytes above zero for good and
-// CompletedBytes measured against data that will never arrive. Anything
-// waiting for MissingBytes to reach zero waits forever.
-//
-// files is 0 before metadata arrives and for an unknown gid, which is how a
-// caller tells "nothing is selected yet" from "all of it is done".
-func (e *Engine) SelectedBytes(id int64) (completed, total int64, files int) {
-	for _, f := range e.Files(id) {
-		if !f.Selected {
-			continue
-		}
-		completed += f.Completed
-		total += f.Length
-		files++
-	}
-	return completed, total, files
-}
-
 // Bitfield returns the completed-pieces bitfield and the piece count.
 // Returning the count explicitly is what stops the last byte's padding bits
 // from reading as missing pieces in the UI.
@@ -198,6 +196,7 @@ func (e *Engine) status(rec *record) Status {
 	// SetLabels, and handing a caller the live one lets it observe a write.
 	labels := slices.Clone(rec.Labels)
 	seedLimits := rec.SeedLimits
+	selection := slices.Clone(rec.Selection)
 	e.mu.RUnlock()
 
 	stats := t.Stats()
@@ -232,8 +231,36 @@ func (e *Engine) status(rec *record) Status {
 		s.MissingBytes = t.BytesMissing()
 		s.PieceCount = t.NumPieces()
 	}
+	sizeWhenDone, have := selectionBytes(t, selection, s.TotalBytes, s.CompletedBytes)
+	s.SizeWhenDone = sizeWhenDone
+	s.LeftUntilDone = max(sizeWhenDone-have, 0)
 	s.State = state(s)
 	return s
+}
+
+// selectionBytes returns the wanted total and how much of it is present.
+//
+// The cheap path is the point: with nothing deselected the selection *is* the
+// torrent, so the library's own totals answer it without a per-file pass. That
+// covers every unfiltered torrent, and status is built on every poll of every
+// torrent. Only a torrent that actually deselects something pays for the walk,
+// and File.BytesCompleted takes the client lock per file.
+func selectionBytes(t *torrent.Torrent, selection []bool, total, completed int64) (sizeWhenDone, have int64) {
+	if t.Info() == nil {
+		return total, completed
+	}
+	files := t.Files()
+	if len(selection) != len(files) || !slices.Contains(selection, false) {
+		return total, completed
+	}
+	for i, f := range files {
+		if !selection[i] {
+			continue
+		}
+		sizeWhenDone += f.Length()
+		have += f.BytesCompleted()
+	}
+	return sizeWhenDone, have
 }
 
 func state(s Status) State {
@@ -248,7 +275,7 @@ func state(s Status) State {
 		return StateQueued
 	case !s.HasMetadata:
 		return StateInitialising
-	case s.MissingBytes == 0:
+	case s.Complete():
 		return StateSeeding
 	default:
 		return StateDownloading

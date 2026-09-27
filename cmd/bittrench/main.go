@@ -359,11 +359,10 @@ func addRequest(source, dir string) (engine.AddRequest, error) {
 // waitForDownload polls until every selected file is complete, the torrent
 // reports an error, or ctx is cancelled.
 //
-// It waits on engine.SelectedBytes rather than on Status.MissingBytes, which
-// never reaches zero for a torrent whose files are not all selected - an
-// extension allow-list would otherwise make this wait forever. Polling rather
-// than an event: anacrolix signals per-piece completion, which says nothing
-// about the file selection that decides "done" here.
+// Polling rather than an event: anacrolix signals per-piece completion, which
+// says nothing about the file selection that decides "done" here. Status.Complete
+// is the engine's answer to that, and counts only the wanted files - an
+// extension allow-list would otherwise make this wait forever.
 func waitForDownload(ctx context.Context, eng *engine.Engine, id int64) error {
 	ticker := time.NewTicker(getPollInterval)
 	defer ticker.Stop()
@@ -377,14 +376,14 @@ func waitForDownload(ctx context.Context, eng *engine.Engine, id int64) error {
 		if st.Error != "" {
 			return fmt.Errorf("torrent %d (%s) failed: %s", id, st.Name, st.Error)
 		}
-		completed, total, files := eng.SelectedBytes(id)
-		if files > 0 && completed >= total {
+		if st.Complete() {
 			return nil
 		}
 		if now := time.Now(); now.Sub(lastLog) >= getProgressInterval {
 			lastLog = now
+			done := st.SizeWhenDone - st.LeftUntilDone
 			slog.Info("downloading", "name", st.Name, "state", st.State,
-				"percent", percent(completed, total), "completed", completed, "total", total,
+				"percent", percent(done, st.SizeWhenDone), "completed", done, "total", st.SizeWhenDone,
 				"down_bytes_per_sec", int64(st.DownloadRate), "peers", st.Peers, "seeders", st.Seeders)
 		}
 		select {

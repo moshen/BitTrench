@@ -109,20 +109,6 @@ func (f *fakeEngine) List() []engine.Status { return f.torrents }
 
 func (f *fakeEngine) Files(id int64) []engine.File { return f.files[id] }
 
-// SelectedBytes mirrors the engine's own implementation: only the files the
-// torrent wants are counted.
-func (f *fakeEngine) SelectedBytes(id int64) (completed, total int64, files int) {
-	for _, file := range f.files[id] {
-		if !file.Selected {
-			continue
-		}
-		completed += file.Completed
-		total += file.Length
-		files++
-	}
-	return completed, total, files
-}
-
 func (f *fakeEngine) Start(_ context.Context, id int64) error {
 	f.started[id] = true
 	return nil
@@ -755,8 +741,9 @@ func TestResponsesAreNotCacheable(t *testing.T) {
 func TestETAAndPercentDone(t *testing.T) {
 	eng := newFakeEngine()
 	eng.torrents = []engine.Status{
-		{ID: 1, HasMetadata: true, TotalBytes: 1000, CompletedBytes: 250, MissingBytes: 750, DownloadRate: 75},
-		{ID: 2, HasMetadata: true, TotalBytes: 1000, CompletedBytes: 1000},
+		{ID: 1, HasMetadata: true, TotalBytes: 1000, CompletedBytes: 250, MissingBytes: 750,
+			SizeWhenDone: 1000, LeftUntilDone: 750, DownloadRate: 75},
+		{ID: 2, HasMetadata: true, TotalBytes: 1000, CompletedBytes: 1000, SizeWhenDone: 1000},
 	}
 	h := newHandler(t, eng, nil)
 
@@ -802,16 +789,17 @@ func parseVersion(t *testing.T, v string) (major, minor int) {
 	return major, minor
 }
 
-// An allow-list torrent whose selected file is complete must read as finished,
-// or Sonarr never imports it: its completion tests are `leftUntilDone == 0`
-// with a stopped/seeding status, and `isFinished`. Reporting the whole
-// torrent's missing bytes fails both for as long as a deselected file exists,
-// which is forever.
+// An allow-list torrent whose wanted files are complete must read as finished,
+// or Sonarr never imports it: its completion tests are `leftUntilDone == 0` with
+// a stopped/seeding status, and `isFinished`. The engine supplies SizeWhenDone
+// and LeftUntilDone - counting only the wanted files - and this pins that the
+// wire fields follow them rather than the whole torrent's figures beside them.
 func TestFilteredTorrentReadsAsCompleteOnceSelectedFilesAre(t *testing.T) {
 	f := newFakeEngine()
 	f.torrents = []engine.Status{{
-		ID: 1, Name: "release", State: engine.StateDownloading, HasMetadata: true,
+		ID: 1, Name: "release", State: engine.StateSeeding, HasMetadata: true,
 		TotalBytes: 1000, CompletedBytes: 900, MissingBytes: 100,
+		SizeWhenDone: 900, LeftUntilDone: 0,
 	}}
 	f.files[1] = []engine.File{
 		{Index: 0, Path: "movie.mkv", Length: 900, Completed: 900, Selected: true},
@@ -842,8 +830,9 @@ func TestFilteredTorrentReadsAsCompleteOnceSelectedFilesAre(t *testing.T) {
 func TestSonarrWouldCallAFilteredTorrentComplete(t *testing.T) {
 	f := newFakeEngine()
 	f.torrents = []engine.Status{{
-		ID: 1, State: engine.StateDownloading, HasMetadata: true,
+		ID: 1, State: engine.StateSeeding, HasMetadata: true,
 		TotalBytes: 1000, CompletedBytes: 900, MissingBytes: 100,
+		SizeWhenDone: 900, LeftUntilDone: 0,
 	}}
 	f.files[1] = []engine.File{
 		{Index: 0, Length: 900, Completed: 900, Selected: true},
@@ -871,7 +860,7 @@ func TestProgressIsMeasuredAgainstTheSelection(t *testing.T) {
 	f.torrents = []engine.Status{{
 		ID: 1, State: engine.StateDownloading, HasMetadata: true,
 		TotalBytes: 1000, CompletedBytes: 450, MissingBytes: 550,
-		DownloadRate: 100,
+		SizeWhenDone: 900, LeftUntilDone: 450, DownloadRate: 100,
 	}}
 	f.files[1] = []engine.File{
 		{Index: 0, Length: 900, Completed: 450, Selected: true},

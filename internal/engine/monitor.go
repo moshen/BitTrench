@@ -69,7 +69,10 @@ func (e *Engine) checkSeedLimits(ratioLimit float64, timeLimit time.Duration) {
 		if t.Info() == nil {
 			continue
 		}
-		complete := t.BytesMissing() == 0
+		// The wanted files, not the whole torrent: an allow-list torrent never
+		// reaches BytesMissing == 0, so its seed clock never started and its
+		// ratio and time caps never fired - it seeded for good.
+		complete := e.selectedComplete(rec)
 
 		e.mu.Lock()
 		finishedAt := rec.FinishedAt

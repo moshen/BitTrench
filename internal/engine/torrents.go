@@ -52,6 +52,11 @@ type record struct {
 	SeedLimits store.SeedLimits
 	// QueuePosition is the torrent's place in the download queue.
 	QueuePosition int
+	// Selection is what the torrent should be downloading, one bool per file.
+	// The *desired* selection, not the live one: a paused or queued torrent
+	// wants nothing at this moment, and its progress still has to be measured
+	// against the files it will want again. nil before metadata arrives.
+	Selection []bool
 	// Queued is set while the queue is holding this torrent back. It is
 	// deliberately not Paused: both are expressed as "nothing is wanted", but
 	// only the user can clear Paused, while the queue clears Queued as slots
@@ -316,7 +321,7 @@ func (e *Engine) onMetadata(rec *record, filtering bool) {
 		slog.Warn("failed to read the persisted file selection", "id", rec.ID, "error", err)
 	}
 	if len(selection) > 0 {
-		if err := applySelection(t, selection); err != nil {
+		if err := e.selectFiles(rec, selection); err != nil {
 			slog.Warn("failed to restore the file selection", "id", rec.ID, "error", err)
 		}
 		return
@@ -335,7 +340,7 @@ func (e *Engine) onMetadata(rec *record, filtering bool) {
 	for i := range all {
 		all[i] = true
 	}
-	if err := applySelection(t, all); err != nil {
+	if err := e.selectFiles(rec, all); err != nil {
 		slog.Warn("failed to select the torrent's files", "id", rec.ID, "error", err)
 	}
 }
@@ -375,6 +380,9 @@ func (e *Engine) applyAllowList(rec *record) {
 			"id", rec.ID, "name", t.Name(), "error", err)
 		return
 	}
+	// Recorded either way: a paused torrent still has a selection, it just is
+	// not downloading it yet.
+	e.setDesiredSelection(rec, selection)
 	if !rec.Paused {
 		if err := applySelection(t, selection); err != nil {
 			e.setError(rec, fmt.Sprintf("failed to apply the extension allow-list: %v", err))
@@ -406,6 +414,24 @@ func (e *Engine) extensionAllowed(path string) bool {
 }
 
 // applySelection maps a per-file boolean selection onto piece priorities.
+// selectFiles records a selection as the torrent's desired one and applies it.
+//
+// Everything that changes what a torrent wants goes through here, so that the
+// record's Selection - which is what Status measures progress and completion
+// against - cannot drift from the priorities actually set on the files.
+func (e *Engine) selectFiles(rec *record, selection []bool) error {
+	e.setDesiredSelection(rec, selection)
+	return applySelection(rec.Torrent, selection)
+}
+
+// setDesiredSelection records the selection without applying it, for the one
+// caller that must not apply it: a paused torrent wants nothing right now.
+func (e *Engine) setDesiredSelection(rec *record, selection []bool) {
+	e.mu.Lock()
+	rec.Selection = slices.Clone(selection)
+	e.mu.Unlock()
+}
+
 func applySelection(t *torrent.Torrent, selection []bool) error {
 	files := t.Files()
 	if len(selection) != len(files) {
@@ -478,7 +504,7 @@ func (e *Engine) SetFileSelection(ctx context.Context, id int64, selection []boo
 	if rec.Torrent.Info() == nil {
 		return errors.New("the torrent's metadata has not arrived yet")
 	}
-	if err := applySelection(rec.Torrent, selection); err != nil {
+	if err := e.selectFiles(rec, selection); err != nil {
 		return err
 	}
 	return e.store.SetFileSelection(ctx, id, selection)
@@ -554,7 +580,7 @@ func (e *Engine) resume(rec *record) {
 	if rec.Torrent.Info() == nil {
 		return
 	}
-	if err := applySelection(rec.Torrent, e.desiredSelection(rec)); err != nil {
+	if err := e.selectFiles(rec, e.desiredSelection(rec)); err != nil {
 		slog.Warn("failed to apply the file selection on resume", "id", rec.ID, "error", err)
 	}
 }

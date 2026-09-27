@@ -105,13 +105,16 @@ Breaking any of these is a bug even when the tests pass.
    `Client.Close()` emits a final round of completions, so flushing before it
    loses exactly the pieces verified last. It lives in `session.close` once;
    every entry point goes through it rather than repeating the sequence.
-9. **"Complete" means the selected files, not the torrent.**
-   `Torrent.BytesMissing` counts every incomplete piece whether it is wanted or
-   not, so `Status.MissingBytes` never reaches zero once any file is deselected
-   - by `allowed_extensions` or by hand. Anything waiting for a download to
-   finish waits on `Engine.SelectedBytes`, and the Transmission fields measured
-   against the selection (`leftUntilDone`, `sizeWhenDone`, `percentDone`,
-   `isFinished`) are derived from it.
+9. **"Complete" means the selected files, not the torrent, and `Status.Complete`
+   is the only place that decides it.** `Torrent.BytesMissing` counts every
+   incomplete piece whether it is wanted or not, so `Status.MissingBytes` never
+   reaches zero once any file is deselected - by `allowed_extensions` or by
+   hand. `Status.SizeWhenDone` and `LeftUntilDone` count only the wanted files;
+   the state machine, the seed monitor, the download queue, the web UI and the
+   Transmission RPC layer all read them rather than deciding for themselves.
+   They are measured against `record.Selection`, the *desired* selection, not
+   live file priorities - a paused or queued torrent wants nothing right now and
+   its progress still has to mean something.
 10. **Held and paused are different things that look the same.** The download
     queue holds a torrent exactly as a pause does - nothing is wanted, per
     invariant 5 - but `Queued` is tracked separately from `Paused`, because only

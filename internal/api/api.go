@@ -80,7 +80,13 @@ type Torrent struct {
 
 	TotalBytes     int64 `json:"total_bytes"`
 	CompletedBytes int64 `json:"completed_bytes"`
-	UploadedBytes  int64 `json:"uploaded_bytes"`
+	// SizeWhenDone and LeftUntilDone cover only the files the torrent wants, so
+	// progress against them reaches 100% for a torrent under an extension
+	// allow-list. TotalBytes stays the torrent's own size, which is what the UI
+	// shows as its size.
+	SizeWhenDone  int64 `json:"size_when_done"`
+	LeftUntilDone int64 `json:"left_until_done"`
+	UploadedBytes int64 `json:"uploaded_bytes"`
 
 	DownloadRate float64 `json:"download_rate"`
 	UploadRate   float64 `json:"upload_rate"`
@@ -111,6 +117,8 @@ func torrentOf(s engine.Status) Torrent {
 		SavePath:       s.SavePath,
 		TotalBytes:     s.TotalBytes,
 		CompletedBytes: s.CompletedBytes,
+		SizeWhenDone:   s.SizeWhenDone,
+		LeftUntilDone:  s.LeftUntilDone,
 		UploadedBytes:  s.UploadedBytes,
 		DownloadRate:   s.DownloadRate,
 		UploadRate:     s.UploadRate,

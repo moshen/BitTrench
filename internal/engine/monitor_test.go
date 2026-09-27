@@ -1,6 +1,9 @@
 package engine
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -113,17 +116,24 @@ func TestSamplerTotalsAndForget(t *testing.T) {
 	}
 }
 
-// ETA is -1 for "unknown", which is what Transmission clients expect.
+// ETA is -1 for "unknown", which is what Transmission clients expect, and it
+// counts the wanted bytes: the bytes a filtered torrent will never ask for
+// would otherwise keep the estimate alive forever.
 func TestETAAndRatio(t *testing.T) {
-	s := Status{MissingBytes: 1000, DownloadRate: 100}
+	s := Status{LeftUntilDone: 1000, DownloadRate: 100}
 	if got := s.ETA(); got != 10*time.Second {
 		t.Errorf("ETA = %v, want 10s", got)
 	}
-	if got := (Status{MissingBytes: 1000}).ETA(); got != -1 {
+	if got := (Status{LeftUntilDone: 1000}).ETA(); got != -1 {
 		t.Errorf("ETA with no rate = %v, want -1", got)
 	}
-	if got := (Status{MissingBytes: 0, DownloadRate: 100}).ETA(); got != -1 {
+	if got := (Status{LeftUntilDone: 0, DownloadRate: 100}).ETA(); got != -1 {
 		t.Errorf("ETA when complete = %v, want -1", got)
+	}
+	// The whole torrent's missing bytes do not enter into it: this torrent has
+	// everything it wants and is only missing files it never asked for.
+	if got := (Status{MissingBytes: 5000, LeftUntilDone: 0, DownloadRate: 100}).ETA(); got != -1 {
+		t.Errorf("ETA with only unwanted bytes left = %v, want -1", got)
 	}
 	if got := (Status{UploadedBytes: 300, TotalBytes: 100}).Ratio(); got != 3 {
 		t.Errorf("Ratio = %v, want 3", got)
@@ -187,5 +197,66 @@ func TestEffectiveSeedLimits(t *testing.T) {
 				t.Errorf("idle = %v, want %v", idle, tc.wantTime)
 			}
 		})
+	}
+}
+
+// The seed caps used to be measured against the whole torrent, so a filtered
+// torrent never reached "complete", its seed clock never started, and neither
+// the ratio nor the time cap ever fired - it seeded for good.
+//
+// The fixture is built so the two files occupy one piece each, and the unwanted
+// file's data is then removed: the wanted file can complete from disk while the
+// torrent as a whole genuinely cannot. Equal-sized tiny files would share a
+// single piece and complete together, which would not exercise this at all.
+func TestSeedLimitsFireForAFilteredTorrent(t *testing.T) {
+	const pieceLen = 16 << 10
+	mi, dataDir := buildTorrent(t, map[string]string{
+		"movie.mkv":     strings.Repeat("w", pieceLen),
+		"zz-extras.iso": strings.Repeat("u", pieceLen),
+	})
+	if err := os.Remove(filepath.Join(dataDir, "release", "zz-extras.iso")); err != nil {
+		t.Fatalf("removing the unwanted file's data: %v", err)
+	}
+
+	h := newHarness(t, func(c *cfgOpts) {
+		c.allowedExtensions = []string{"mkv"}
+		c.savePath = dataDir
+		c.seedTimeLimitSecs = 1
+	})
+	ctx := context.Background()
+	id, _, err := h.engine.Add(ctx, AddRequest{Metainfo: mi})
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	h.waitForMetadata(t, id)
+
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		st, _ := h.engine.Status(id)
+		if st.Complete() {
+			// The point of the fixture: the wanted file is done while the
+			// torrent is not.
+			if st.MissingBytes == 0 {
+				t.Fatal("the whole torrent completed, so this does not test the filtered case")
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the wanted file never completed: %d of %d left",
+				st.LeftUntilDone, st.SizeWhenDone)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// One tick of the monitor's work, without waiting out its interval.
+	h.engine.checkSeedLimits(0, time.Second)
+	if st, _ := h.engine.Status(id); st.FinishedAt.IsZero() {
+		t.Fatal("the seed clock never started for a filtered torrent")
+	}
+
+	time.Sleep(1100 * time.Millisecond)
+	h.engine.checkSeedLimits(0, time.Second)
+	if st, _ := h.engine.Status(id); !st.Paused {
+		t.Error("the seed time cap did not pause a filtered torrent that had met it")
 	}
 }

@@ -541,10 +541,11 @@ func TestPausedAddWantsNothing(t *testing.T) {
 	}
 }
 
-// SelectedBytes is what the one-shot download waits on, so it has to be true
-// for a filtered torrent - the case Status cannot express. The data is already
-// on disk here, so the hash check completes it without a swarm.
-func TestSelectedBytesCountsOnlyTheSelectedFiles(t *testing.T) {
+// Status.SizeWhenDone and LeftUntilDone are what everything asks about a
+// filtered torrent - the state machine, the seed monitor, the queue and the RPC
+// layer. The data is already on disk here, so the hash check completes it
+// without a swarm.
+func TestWantedBytesCountOnlyTheSelectedFiles(t *testing.T) {
 	mi, dataDir := buildTorrent(t, map[string]string{
 		"movie.mkv":  "video data here",
 		"sample.avi": "sample data",
@@ -571,27 +572,28 @@ func TestSelectedBytesCountsOnlyTheSelectedFiles(t *testing.T) {
 		t.Fatal("the fixture has no .mkv file to select")
 	}
 
-	// The engine hashes what is already on disk, so wait for the selected
-	// files to read as complete rather than assuming the check has finished.
+	// The engine hashes what is already on disk, so wait for the wanted files
+	// to read as complete rather than assuming the check has finished.
 	deadline := time.Now().Add(15 * time.Second)
-	var completed, total int64
-	var files int
+	var st Status
 	for {
-		completed, total, files = h.engine.SelectedBytes(id)
-		if files > 0 && completed >= total {
+		st, _ = h.engine.Status(id)
+		if st.Complete() {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("selected bytes stalled at %d/%d over %d files", completed, total, files)
+			t.Fatalf("stalled with %d of %d wanted bytes left", st.LeftUntilDone, st.SizeWhenDone)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	if files != 1 {
-		t.Errorf("selected files = %d, want 1 (only the .mkv)", files)
+	if st.SizeWhenDone != wantTotal {
+		t.Errorf("SizeWhenDone = %d, want %d (the .mkv alone)", st.SizeWhenDone, wantTotal)
 	}
-	if total != wantTotal {
-		t.Errorf("selected total = %d, want %d (the .mkv alone)", total, wantTotal)
+	// And the state machine agrees, which is what the web UI renders: it used to
+	// say "downloading" at 90% for as long as the torrent existed.
+	if st.State != StateSeeding {
+		t.Errorf("state = %s, want seeding once every wanted file has arrived", st.State)
 	}
 
 	// The point of the method: the selected view is narrower than the whole
@@ -600,18 +602,14 @@ func TestSelectedBytesCountsOnlyTheSelectedFiles(t *testing.T) {
 	// small enough to share a single piece, so the hash check completes them
 	// whether they were selected or not. What makes MissingBytes unusable is a
 	// real swarm, where the deselected bytes never arrive.
-	st, ok := h.engine.Status(id)
-	if !ok {
-		t.Fatal("no status for the torrent")
-	}
-	if st.TotalBytes <= total {
-		t.Errorf("torrent total %d should exceed the selected total %d", st.TotalBytes, total)
+	if st.TotalBytes <= st.SizeWhenDone {
+		t.Errorf("torrent total %d should exceed the wanted total %d", st.TotalBytes, st.SizeWhenDone)
 	}
 }
 
-// Before metadata arrives there is nothing selected yet, and a zero file count
-// is how a caller tells that from "all of it is done".
-func TestSelectedBytesReportsNoFilesBeforeMetadata(t *testing.T) {
+// Before metadata there is nothing selected yet, and nothing missing yet
+// either. Complete has to be false anyway, or a fresh magnet reads as done.
+func TestAFreshMagnetIsNotComplete(t *testing.T) {
 	h := newHarness(t, nil)
 	id, _, err := h.engine.Add(context.Background(), AddRequest{
 		Source: "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
@@ -619,11 +617,15 @@ func TestSelectedBytesReportsNoFilesBeforeMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}
-	if completed, total, files := h.engine.SelectedBytes(id); files != 0 || completed != 0 || total != 0 {
-		t.Errorf("SelectedBytes = (%d, %d, %d), want all zero before metadata", completed, total, files)
+	st, ok := h.engine.Status(id)
+	if !ok {
+		t.Fatal("no status for the torrent")
 	}
-	if _, _, files := h.engine.SelectedBytes(4242); files != 0 {
-		t.Errorf("an unknown gid reported %d selected files, want 0", files)
+	if st.Complete() {
+		t.Error("a torrent with no metadata must not read as complete")
+	}
+	if st.State != StateInitialising {
+		t.Errorf("state = %s, want initializing", st.State)
 	}
 }
 

@@ -73,7 +73,6 @@ type Torrents interface {
 	Status(id int64) (engine.Status, bool)
 	List() []engine.Status
 	Files(id int64) []engine.File
-	SelectedBytes(id int64) (completed, total int64, files int)
 	SetLabels(ctx context.Context, id int64, labels []string) error
 	SetSeedLimits(ctx context.Context, id int64, limits store.SeedLimits) error
 	MoveInQueue(ctx context.Context, id int64, move engine.Move) error
@@ -654,20 +653,10 @@ func (h *Handler) torrentFields(s engine.Status, files []engine.File) map[string
 	// an allowed_extensions allow-list - permanently 90%-and-downloading, so
 	// Sonarr's `leftUntilDone == 0` and `isFinished` completion tests never
 	// fire and the release is never imported.
-	selCompleted, selTotal, selFiles := h.engine.SelectedBytes(s.ID)
-	haveSelection := selFiles > 0
-
-	// Before metadata there is no selection to measure, so fall back to the
-	// whole-torrent figures rather than reporting a confident zero.
-	sizeWhenDone, leftUntilDone := s.TotalBytes, s.MissingBytes
-	if haveSelection {
-		sizeWhenDone = selTotal
-		leftUntilDone = max(selTotal-selCompleted, 0)
-	}
-	// Derived from whichever figure applied, so an unfiltered torrent keeps the
-	// meaning it always had. HasMetadata gates it because a magnet whose info
-	// dict has not resolved has nothing missing yet and must not read as done.
-	complete := s.HasMetadata && leftUntilDone == 0
+	// The engine keeps both sets of figures, and Status.Complete is the daemon's
+	// one answer to "is it done", so there is nothing to decide here.
+	sizeWhenDone, leftUntilDone := s.SizeWhenDone, s.LeftUntilDone
+	complete := s.Complete()
 
 	var percentDone float64
 	switch {
@@ -766,7 +755,7 @@ func (h *Handler) torrentFields(s engine.Status, files []engine.File) map[string
 		// falls back to the magnet's display name, then to the infohash.
 		"name":       s.Name,
 		"hashString": s.InfoHash.HexString(),
-		"status":     trStatus(s, complete),
+		"status":     trStatus(s),
 		"totalSize":  s.TotalBytes,
 		"haveValid":  s.CompletedBytes,
 		// downloadedEver is bytes written to disk for this torrent; the
@@ -779,7 +768,7 @@ func (h *Handler) torrentFields(s engine.Status, files []engine.File) map[string
 		"percentComplete":    percentComplete,
 		"rateDownload":       int64(s.DownloadRate),
 		"rateUpload":         int64(s.UploadRate),
-		"eta":                etaSeconds(s, leftUntilDone),
+		"eta":                etaSeconds(s),
 		"isFinished":         complete,
 		"isStalled":          false,
 		"peersConnected":     s.Peers,
@@ -819,18 +808,11 @@ func (h *Handler) torrentFields(s engine.Status, files []engine.File) map[string
 	}
 }
 
-func trStatus(s engine.Status, complete bool) int {
+func trStatus(s engine.Status) int {
 	switch s.State {
 	case engine.StateQueued:
 		return trStatusDownloadWait
 	case engine.StateDownloading:
-		// The engine calls a filtered torrent "downloading" for as long as any
-		// piece is missing, wanted or not. Once everything selected has
-		// arrived there is nothing left to download, and saying so is what
-		// puts the torrent in the state a client tests for completion.
-		if complete {
-			return trStatusSeeding
-		}
 		return trStatusDownloading
 	case engine.StateSeeding:
 		return trStatusSeeding
@@ -843,16 +825,14 @@ func trStatus(s engine.Status, complete bool) int {
 	}
 }
 
-// etaSeconds reports Transmission's -1 for "unknown".
-//
-// Status.ETA divides the whole torrent's missing bytes by the rate, which
-// overstates a filtered torrent's remaining time and never reaches zero, so
-// the wanted bytes are passed in instead.
-func etaSeconds(s engine.Status, leftUntilDone int64) int64 {
-	if leftUntilDone <= 0 || s.DownloadRate <= 0 {
+// etaSeconds reports Transmission's -1 for "unknown". Status.ETA already counts
+// only the wanted bytes.
+func etaSeconds(s engine.Status) int64 {
+	eta := s.ETA()
+	if eta < 0 {
 		return -1
 	}
-	return int64(float64(leftUntilDone) / s.DownloadRate)
+	return int64(eta.Seconds())
 }
 
 // project returns only the requested keys. When fields is empty the whole set

@@ -153,8 +153,14 @@ function torrentSize(t) {
 	return t.total_bytes || 0;
 }
 function torrentProgressPct(t) {
-	if (!t.total_bytes) return 0;
-	return (100 * t.completed_bytes) / t.total_bytes;
+	// Against the files the torrent wants, not its whole size: under an
+	// extension allow-list the rest never arrives, and progress measured against
+	// the whole torrent stops short of 100% for good. size_when_done equals
+	// total_bytes when nothing is deselected.
+	const size = t.size_when_done || t.total_bytes;
+	if (!size) return 0;
+	const done = size - (t.left_until_done || 0);
+	return (100 * done) / size;
 }
 function torrentDownSpeed(t) {
 	// Already bytes per second: the engine samples the library's cumulative

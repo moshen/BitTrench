@@ -32,7 +32,6 @@ func (s *stubEngine) Status(id int64) (engine.Status, bool) {
 }
 func (s *stubEngine) List() []engine.Status                            { return s.torrents }
 func (s *stubEngine) Files(int64) []engine.File                        { return nil }
-func (s *stubEngine) SelectedBytes(int64) (int64, int64, int)          { return 0, 0, 0 }
 func (s *stubEngine) SetLabels(context.Context, int64, []string) error { return nil }
 
 func (s *stubEngine) SetSeedLimits(context.Context, int64, store.SeedLimits) error { return nil }

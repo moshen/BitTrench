@@ -6,8 +6,6 @@ import (
 	"log/slog"
 	"slices"
 
-	"github.com/anacrolix/torrent"
-
 	"github.com/moshen/bittrench/internal/store"
 )
 
@@ -146,13 +144,21 @@ func (e *Engine) reconcileQueue() {
 
 	var hold, release []*record
 
+	// Completion is read before taking the lock: it walks the wanted files and
+	// File.BytesCompleted takes the torrent client's lock, which is not a lock
+	// to be holding e.mu across.
+	complete := make(map[int64]bool)
+	for _, rec := range e.snapshot() {
+		complete[rec.ID] = e.selectedComplete(rec)
+	}
+
 	e.mu.Lock()
 	slots := size
 	for _, rec := range e.queueOrderLocked() {
 		// A torrent stopped by hand, one that failed, and one that has finished
 		// downloading all occupy no slot: the first two are not trying to
 		// download, and the third is seeding.
-		if rec.Paused || rec.Error != "" || selectedComplete(rec) {
+		if rec.Paused || rec.Error != "" || complete[rec.ID] {
 			// A finished torrent that is still marked queued would otherwise
 			// never be let go, since nothing below considers it again.
 			if rec.Queued {
@@ -191,22 +197,20 @@ func (e *Engine) reconcileQueue() {
 
 // selectedComplete reports whether every file a torrent wants has arrived.
 //
-// Not BytesMissing == 0, which counts the files it does not want too - see
-// Engine.SelectedBytes. Callers must hold the lock; it reads only the library's
-// own state, which has its own.
-func selectedComplete(rec *record) bool {
-	if rec.Torrent.Info() == nil {
+// Measured against the record's desired selection rather than the live
+// priorities: a held torrent wants nothing at this moment, and asking the
+// library would call every held torrent incomplete - including one whose data
+// is already on disk, which would then sit in the queue waiting for a slot it
+// does not need.
+func (e *Engine) selectedComplete(rec *record) bool {
+	e.mu.RLock()
+	selection := slices.Clone(rec.Selection)
+	e.mu.RUnlock()
+
+	t := rec.Torrent
+	if t.Info() == nil || len(selection) == 0 {
 		return false
 	}
-	selected := 0
-	for _, f := range rec.Torrent.Files() {
-		if f.Priority() == torrent.PiecePriorityNone {
-			continue
-		}
-		selected++
-		if f.BytesCompleted() < f.Length() {
-			return false
-		}
-	}
-	return selected > 0
+	sizeWhenDone, have := selectionBytes(t, selection, t.Length(), t.BytesCompleted())
+	return sizeWhenDone > 0 && have >= sizeWhenDone
 }
