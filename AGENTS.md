@@ -106,7 +106,13 @@ Breaking any of these is a bug even when the tests pass.
    and clients poll immediately after adding a magnet.
 7. **The config schema is a compatibility surface.** Live `config.toml` files
    exist and unknown keys are a startup error by design. Adding a key is fine;
-   renaming or removing one breaks a deployment.
+   renaming or removing one breaks a deployment. The file is also the *only*
+   source for a value, with four named exceptions in `internal/config/env.go`:
+   the API listener's interface and port, the save path and whether logs go to
+   file. All four are the container's wiring rather than the operator's
+   preference, which is why the image pins them and a mounted config cannot
+   change them. A fifth override needs the same argument those four got - a value
+   that can arrive from two places is a value nobody can find.
 8. **Shutdown order is correctness, not tidiness.** HTTP first, then the torrent
    client, then flush piece completion, then the database, then the device.
    `Client.Close()` emits a final round of completions, so flushing before it

@@ -84,6 +84,31 @@ The state database and the log directory default to sitting **beside the cofig
 file that was found**. Set `state_db_path` and `log_dir` to put them somewhere
 else.
 
+### Overriding from the environment
+
+Four keys, and only these four, can also come from the environment. Each
+variable is named after the key it overrides:
+
+| Variable | Overrides | The image sets |
+|---|---|---|
+| `BITTRENCH_API_LISTEN_INTERFACE` | `[api] listen_interface` | `0.0.0.0` |
+| `BITTRENCH_API_LISTEN_PORT` | `[api] listen_port` | `6800` |
+| `BITTRENCH_TORRENT_SAVE_PATH` | `[torrent] save_path` | `/downloads` |
+| `BITTRENCH_LOGGING_TO_FILE` | `[logging] to_file` | `0` |
+
+They exist for the container image, where the config file is yours but the wiring
+is the image's - so a config written for a host, or copied between deployments,
+cannot change how the container is reached, where it writes, or where its logs
+go. A published port has to reach a listener on a routable interface, and
+`127.0.0.1` inside a container is reachable from nothing outside it; the writable
+mount is the image's to name; and a container's logs belong on stderr, where
+`docker logs` already collects them.
+
+Unset or empty leaves the file's value alone, and a value that is not an IP
+address, a port or a boolean is a startup error naming the variable. Everything
+else comes from the file. `BITTRENCH_LOG` sets the log level (`debug`, `info`,
+`warn`, `error`) and is not part of the schema.
+
 ## Build and run
 
 The toolchain is pinned with mise, which also fixes `CGO_ENABLED=0` and

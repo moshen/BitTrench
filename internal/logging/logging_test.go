@@ -2,6 +2,7 @@ package logging
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
@@ -124,4 +125,32 @@ func exists(t *testing.T, dir, name string) bool {
 	t.Helper()
 	_, err := os.Stat(filepath.Join(dir, name))
 	return err == nil
+}
+
+// The directory is the switch: given one, Setup opens a file and hands back the
+// writer to close; given none, it returns nil and there is nothing to close -
+// which is the container case, where stderr is the whole of the output.
+func TestSetupWritesFilesOnlyWhenGivenADirectory(t *testing.T) {
+	dir := t.TempDir()
+	w := Setup(dir, "bittrench", 7)
+	if w == nil {
+		t.Fatal("Setup with a directory should have opened a file")
+	}
+	slog.Info("into the file")
+	if err := w.Close(); err != nil {
+		t.Fatalf("closing the writer: %v", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("reading the log directory: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("wrote %d files, want 1", len(entries))
+	}
+
+	if w := Setup("", "bittrench", 7); w != nil {
+		t.Errorf("Setup with no directory returned a writer to close: %#v", w)
+	}
+	// Still a working logger, on stderr alone.
+	slog.Info("onto stderr only")
 }

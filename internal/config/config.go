@@ -120,6 +120,12 @@ type LoggingConfig struct {
 	LogDir string `toml:"log_dir"`
 	// MaxAgeDays deletes log files older than this. 0 disables cleanup.
 	MaxAgeDays uint32 `toml:"max_age_days"`
+	// ToFile writes the rolling files at all. stderr is written either way, so
+	// turning this off hands the logs to whatever already collects the
+	// process's output - a container runtime, or the journal. Leave it on under
+	// the Windows SCM, where stderr is disconnected and the file is the only
+	// place anything can be read.
+	ToFile bool `toml:"to_file"`
 }
 
 // Defaults returns an AppConfig pre-populated with every default value.
@@ -147,7 +153,7 @@ func Defaults() AppConfig {
 				SeedRatioLimit:      2.0,
 			},
 		},
-		Logging: LoggingConfig{MaxAgeDays: 7},
+		Logging: LoggingConfig{MaxAgeDays: 7, ToFile: true},
 	}
 }
 
@@ -171,7 +177,9 @@ func Parse(text string) (AppConfig, error) {
 	return cfg, nil
 }
 
-// Load reads, parses and validates the config at path.
+// Load reads, parses and validates the config at path, applying the two API
+// listener environment overrides in between - see env.go for why those exist
+// and why nothing else does.
 func Load(ctx context.Context, path string) (AppConfig, error) {
 	contents, err := os.ReadFile(path)
 	if err != nil {
@@ -180,6 +188,10 @@ func Load(ctx context.Context, path string) (AppConfig, error) {
 	cfg, err := Parse(string(contents))
 	if err != nil {
 		return cfg, fmt.Errorf("failed to parse config file %s: %w", path, err)
+	}
+	// Before Validate, so an overridden listener is the one that gets checked.
+	if err := cfg.applyEnv(os.Getenv); err != nil {
+		return cfg, err
 	}
 	if err := cfg.Validate(ctx); err != nil {
 		return cfg, err
@@ -349,8 +361,12 @@ func (c *AppConfig) StateDBFile(configPath string) string {
 }
 
 // LogDir is the resolved log directory, defaulting to `logs/` beside the
-// config file.
+// config file - and "" when `to_file` is off, which is how logging.Setup is
+// told to write to stderr and nowhere else.
 func (c *AppConfig) LogDir(configPath string) string {
+	if !c.Logging.ToFile {
+		return ""
+	}
 	if c.Logging.LogDir != "" {
 		return c.Logging.LogDir
 	}

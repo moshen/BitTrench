@@ -40,6 +40,11 @@ dns = "203.0.113.1, 203.0.113.2"
 enabled = true
 listen_interface = "127.0.0.1"
 listen_port = 6800
+# These two are the only values anything outside this file can override:
+# BITTRENCH_API_LISTEN_INTERFACE and BITTRENCH_API_LISTEN_PORT win over them
+# when set. That is how the container image pins the port it publishes, so a
+# config mounted into it does not change which port to map. Unset or empty means
+# the values here stand.
 # HTTP Basic Auth for the Transmission RPC endpoint and the web UI. Both share
 # the same port and credentials. Comment both out to disable authentication,
 # which is reasonable for localhost-only use.
@@ -47,6 +52,11 @@ username = "change-me"
 password = "change-me"
 
 [torrent]
+# Where downloads are written. Required.
+#
+# BITTRENCH_TORRENT_SAVE_PATH wins over it when set, which is how the container
+# image points downloads at its own mount without the config file having to know
+# where that is.
 save_path = "/path/to/torrents"
 # How many torrents may download at once.
 #
@@ -106,6 +116,15 @@ seed_time_limit_secs = 0
 # max_peers_per_torrent = 100
 
 [logging]
+# Write the daily-rotating log files at all. stderr is written either way, so
+# turning this off hands the logs to whatever already collects the process's
+# output - `docker logs`, or the journal - instead of piling up files nobody
+# reads. Leave it on under the Windows service, where stderr is disconnected and
+# the file is the only place anything can be read.
+#
+# BITTRENCH_LOGGING_TO_FILE (1 or 0) wins over it when set; the container image
+# sets it to 0. Default: true
+to_file = true
 # Directory for the daily-rotating log files. Defaults to a `logs/`
 # subdirectory next to this config file. Worth setting explicitly when running
 # as a Windows service, where the process working directory is

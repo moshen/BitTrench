@@ -65,6 +65,17 @@ func New(cfg *config.AppConfig, eng Engine) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to bind the API listener on %s: %w", addr, err)
 	}
+	// Auth is optional because the default bind is loopback, where it buys
+	// little. Off the loopback it is the only thing between this endpoint and
+	// whoever can route to it - and the container image binds 0.0.0.0 by
+	// design, so this combination is now reachable by accident rather than
+	// only by hand. A warning, not an error: an operator who has put the
+	// listener behind something else is entitled to it.
+	if !addr.Addr().IsLoopback() && cfg.API.Username == "" && cfg.API.Password == "" {
+		slog.Warn("the RPC endpoint and web UI are bound off the loopback with no authentication; "+
+			"set [api] username and password, or publish the port to 127.0.0.1 only",
+			"addr", addr)
+	}
 
 	return &Server{
 		http: &http.Server{

@@ -120,10 +120,16 @@ func (w *RollingWriter) prune(now time.Time) {
 }
 
 // Setup installs the process-wide slog logger, writing to stderr and - when a
-// log directory is usable - to a daily-rotating file as well. It returns the
-// rolling writer so shutdown can close it; the writer is nil when file logging
-// could not be started, which is a warning rather than a fatal error, since a
-// daemon that cannot write logs should still torrent.
+// log directory is given and usable - to a daily-rotating file as well. It
+// returns the rolling writer so shutdown can close it; the writer is nil when
+// there is no file to close, either because none was asked for or because it
+// could not be opened. The latter is a warning rather than a fatal error, since
+// a daemon that cannot write logs should still torrent.
+//
+// An empty logDir is not a misconfiguration: it is how the config layer reports
+// `[logging] to_file = false`, where stderr - collected by a container runtime
+// or by the journal - is the whole of the output and a file would only pile up
+// unread.
 //
 // Call exactly once per process. The level follows BITTRENCH_LOG, and falls
 // back to info when it is unset or unparseable.
@@ -134,11 +140,14 @@ func Setup(logDir, prefix string, maxAgeDays uint32) *RollingWriter {
 	}
 
 	var out io.Writer = os.Stderr
-	writer, err := NewRollingWriter(logDir, prefix, maxAgeDays)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: file logging disabled - %v\n", err)
-	} else {
-		out = io.MultiWriter(os.Stderr, writer)
+	var writer *RollingWriter
+	if logDir != "" {
+		w, err := NewRollingWriter(logDir, prefix, maxAgeDays)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: file logging disabled - %v\n", err)
+		} else {
+			writer, out = w, io.MultiWriter(os.Stderr, w)
+		}
 	}
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(out, &slog.HandlerOptions{Level: level})))

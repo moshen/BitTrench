@@ -36,6 +36,7 @@ func TestSampleDocumentsTheKeys(t *testing.T) {
 		"enable_pex",
 		"enabled",
 		"download_queue_size",
+		"to_file",
 	} {
 		if !strings.Contains(string(sample), key) {
 			t.Errorf("config.sample.toml does not document %s", key)
@@ -272,4 +273,218 @@ func validConfig() AppConfig {
 	}
 	cfg.Torrent.SavePath = "/tmp/torrents"
 	return cfg
+}
+
+// The environment overrides only the API listener, and only when it says
+// something. Table-driven over a fake getter rather than t.Setenv, so the cases
+// cannot interact and nothing depends on the process environment.
+func TestApplyEnvOverridesTheListener(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		env           map[string]string
+		wantInterface string
+		wantPort      uint16
+		wantErr       string
+	}{
+		{
+			name:          "absent leaves the file alone",
+			wantInterface: "127.0.0.1",
+			wantPort:      6800,
+		},
+		{
+			name:          "empty leaves the file alone",
+			env:           map[string]string{EnvListenInterface: "", EnvListenPort: ""},
+			wantInterface: "127.0.0.1",
+			wantPort:      6800,
+		},
+		{
+			name:          "both override",
+			env:           map[string]string{EnvListenInterface: "0.0.0.0", EnvListenPort: "9091"},
+			wantInterface: "0.0.0.0",
+			wantPort:      9091,
+		},
+		{
+			name:          "the interface alone overrides",
+			env:           map[string]string{EnvListenInterface: "::"},
+			wantInterface: "::",
+			wantPort:      6800,
+		},
+		{
+			name:          "surrounding space is ignored",
+			env:           map[string]string{EnvListenPort: " 6801 "},
+			wantInterface: "127.0.0.1",
+			wantPort:      6801,
+		},
+		{
+			name:    "a hostname is not an interface",
+			env:     map[string]string{EnvListenInterface: "localhost"},
+			wantErr: EnvListenInterface,
+		},
+		{
+			name:    "a non-numeric port is reported",
+			env:     map[string]string{EnvListenPort: "http"},
+			wantErr: EnvListenPort,
+		},
+		{
+			name:    "a port above 65535 is reported",
+			env:     map[string]string{EnvListenPort: "70000"},
+			wantErr: EnvListenPort,
+		},
+		{
+			name:    "port 0 is reported",
+			env:     map[string]string{EnvListenPort: "0"},
+			wantErr: EnvListenPort,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Defaults()
+			err := cfg.applyEnv(func(k string) string { return tc.env[k] })
+			if tc.wantErr != "" {
+				if err == nil {
+					t.Fatalf("expected an error naming %s", tc.wantErr)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Errorf("error should name %s, got: %v", tc.wantErr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("applyEnv: %v", err)
+			}
+			if cfg.API.ListenInterface != tc.wantInterface {
+				t.Errorf("listen_interface = %q, want %q", cfg.API.ListenInterface, tc.wantInterface)
+			}
+			if cfg.API.ListenPort != tc.wantPort {
+				t.Errorf("listen_port = %d, want %d", cfg.API.ListenPort, tc.wantPort)
+			}
+		})
+	}
+}
+
+// An override has to survive the whole of Load, so ListenAddr reports the
+// overridden address and not the file's.
+func TestLoadAppliesTheListenerOverrides(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte("[api]\nlisten_interface = \"127.0.0.1\"\nlisten_port = 6800\n"), 0o600); err != nil {
+		t.Fatalf("writing the config: %v", err)
+	}
+	t.Setenv(EnvListenInterface, "0.0.0.0")
+	t.Setenv(EnvListenPort, "6800")
+
+	// Load validates, and this config names no WireGuard peer, so it fails -
+	// after applyEnv has run, which is what this asserts.
+	cfg, err := Load(context.Background(), path)
+	if err == nil {
+		t.Fatal("expected validation to fail on a config with no [wireguard] section")
+	}
+	addr, err := cfg.API.ListenAddr()
+	if err != nil {
+		t.Fatalf("ListenAddr: %v", err)
+	}
+	if got := addr.String(); got != "0.0.0.0:6800" {
+		t.Errorf("listen addr = %s, want 0.0.0.0:6800", got)
+	}
+}
+
+// The save path and the file-logging switch, the other two things a container
+// image pins. Defaults() has no save_path and logs to files, so every case here
+// starts from "the file said nothing".
+func TestApplyEnvOverridesTheSavePathAndFileLogging(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		env          map[string]string
+		wantSavePath string
+		wantToFile   bool
+		wantErr      string
+	}{
+		{
+			name:       "absent leaves the file alone",
+			wantToFile: true,
+		},
+		{
+			name:         "the save path overrides",
+			env:          map[string]string{EnvSavePath: "/downloads"},
+			wantSavePath: "/downloads",
+			wantToFile:   true,
+		},
+		{
+			name:       "file logging off",
+			env:        map[string]string{EnvLogToFile: "0"},
+			wantToFile: false,
+		},
+		{
+			name:       "file logging off, spelled false",
+			env:        map[string]string{EnvLogToFile: "false"},
+			wantToFile: false,
+		},
+		{
+			name:       "file logging back on",
+			env:        map[string]string{EnvLogToFile: "1"},
+			wantToFile: true,
+		},
+		{
+			name:    "a non-boolean is reported",
+			env:     map[string]string{EnvLogToFile: "sometimes"},
+			wantErr: EnvLogToFile,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Defaults()
+			err := cfg.applyEnv(func(k string) string { return tc.env[k] })
+			if tc.wantErr != "" {
+				if err == nil {
+					t.Fatalf("expected an error naming %s", tc.wantErr)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Errorf("error should name %s, got: %v", tc.wantErr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("applyEnv: %v", err)
+			}
+			if cfg.Torrent.SavePath != tc.wantSavePath {
+				t.Errorf("save_path = %q, want %q", cfg.Torrent.SavePath, tc.wantSavePath)
+			}
+			if cfg.Logging.ToFile != tc.wantToFile {
+				t.Errorf("to_file = %v, want %v", cfg.Logging.ToFile, tc.wantToFile)
+			}
+		})
+	}
+}
+
+// An overridden save_path satisfies the requirement that one be set, so a config
+// that names none is usable in a container that names one.
+func TestSavePathFromTheEnvironmentSatisfiesValidation(t *testing.T) {
+	cfg := validConfig()
+	cfg.Torrent.SavePath = ""
+	if err := cfg.Validate(context.Background()); err == nil {
+		t.Fatal("expected a missing save_path to be rejected")
+	}
+	if err := cfg.applyEnv(func(k string) string {
+		if k == EnvSavePath {
+			return "/downloads"
+		}
+		return ""
+	}); err != nil {
+		t.Fatalf("applyEnv: %v", err)
+	}
+	if err := cfg.Validate(context.Background()); err != nil {
+		t.Errorf("an overridden save_path should validate: %v", err)
+	}
+}
+
+// to_file off is reported to logging.Setup as an empty directory, which is what
+// keeps the rolling writer from being started at all.
+func TestLogDirIsEmptyWhenFileLoggingIsOff(t *testing.T) {
+	cfg := Defaults()
+	cfg.Logging.ToFile = false
+	if got := cfg.LogDir(filepath.Join("/etc", "bittrench", "config.toml")); got != "" {
+		t.Errorf("LogDir = %q, want the empty string", got)
+	}
+	// An explicit log_dir does not bring it back: to_file is the switch.
+	cfg.Logging.LogDir = "/var/log/bittrench"
+	if got := cfg.LogDir("config.toml"); got != "" {
+		t.Errorf("LogDir = %q, want the empty string", got)
+	}
 }
