@@ -49,6 +49,8 @@ save_path = "/path/to/torrents"
 # and a client can reorder it. 0 disables the queue and downloads everything at
 # once.
 download_queue_size = 5
+# Keep verified-piece state across restarts. With this off, every restart
+# rehashes every torrent.
 fast_resume = true
 enable_dht = true
 # Has no effect, and is kept only so existing configuration files keep loading.
