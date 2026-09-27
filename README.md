@@ -1,21 +1,22 @@
 # BitTrench
 
+<img src="internal/webui/assets/favicon.svg" alt="Shovel digging bits" width="200px">
+
+<br/>
+
 A single binary that brings up a **user-space WireGuard tunnel** and runs a
 **BitTorrent engine entirely inside it** - peer TCP, DHT UDP, UDP tracker
 datagrams, HTTP(S) tracker fetches, and every DNS lookup they imply. It exposes
 a **Transmission-compatible JSON-RPC endpoint** on localhost so Sonarr and
-Radarr can drive it, plus a web UI.
+Radarr can drive it, along with a web UI.
 
-The whole value of the project is the word *entirely*. One host UDP socket -
-the WireGuard bind - is the only thing in the process that touches the host
-network stack, alongside the localhost RPC/UI listener. Every path by which a
-byte or a DNS query could escape is enumerated as the invariants in
-`AGENTS.md`. **Check any new networking code against them.**
+One host UDP socket (the WireGuard connection) is the only network connection
+the host machine sees, alongside the localhost RPC/UI listener.
 
 ## Build and run
 
 The toolchain is pinned with mise, which also fixes `CGO_ENABLED=0` and
-`-tags=noboltdb` - both deliberate, see `AGENTS.md`.
+`-tags=noboltdb`.
 
 ```sh
 mise run build     # every package, for this host
@@ -25,24 +26,20 @@ mise run release   # stripped binaries for every target, into dist/
 mise exec -- go run ./cmd/bittrench -config /path/to/config.toml
 ```
 
-`mise tasks` lists them. They run through mise, so the pinned toolchain and the
-`CGO_ENABLED=0` / `-tags=noboltdb` settings apply - which is why `release` can
-cross-compile every target from one machine with no C toolchain.
+`release` can cross-compile every target from one machine with no C toolchain.
 
 Copy `config.sample.toml` to `config.toml` and fill in the `[wireguard]`
 section from your provider's configuration. `wireguard.dns` is **required**:
-without it nothing can be resolved inside the tunnel and every lookup would
-fall back to the host resolver, which would make the tunnel decorative.
+without it nothing can be resolved inside the tunnel.
 
-### Prove the tunnel works before anything else
+### Prove the tunnel works with your config
 
 ```sh
 mise exec -- go run ./cmd/bittrench -config config.toml dial-through
 ```
 
-This fetches `https://api.ipify.org` through the tunnel - resolution included
-- and prints the exit IP. If that is not your VPN's address, nothing else in
-the daemon should be trusted yet.
+This fetches `https://api.ipify.org` through the tunnel and prints the exit IP.
+If that is not your VPN's address, nothing else in the daemon should be trusted.
 
 ### Download one torrent and exit
 
@@ -88,9 +85,7 @@ bittrench -config C:\ProgramData\bittrench\config.toml install
 bittrench uninstall
 ```
 
-The config path must be absolute. The SCM runs services from
-`C:\Windows\System32`, so a relative path would put the state database and the
-log directory somewhere unexpected - `install` rejects one.
+The config path must be absolute.
 
 ## Layout
 
@@ -109,26 +104,22 @@ log directory somewhere unexpected - `install` rejects one.
 | `internal/service` | the Windows SCM integration |
 | `internal/tunneltest` | a real two-ended tunnel, for tests |
 
-## Verifying there is no leak
+## Verifying there are no leaks
 
-The in-process tests cover what can be proven without a VPN: a real encrypted
+The unit tests cover what can be proven without a VPN: a real encrypted
 tunnel between two devices over loopback, DHT bootstrap and tracker hostnames
-resolved by a DNS server that exists only inside the tunnel, and an assertion
-that the netstack cannot reach a host loopback listener. **CI fails if someone
-reintroduces a leak on those paths.**
+resolved by a DNS server that exists only inside the tunnel, and asserts
+that the netstack cannot reach a host loopback listener. **CI fails if a leak is
+introduced on those paths.**
 
-What the tests cannot prove needs a live run, and is not optional before
-trusting this daemon with real traffic:
+What the tests cannot prove needs a live run, and has been verified manually:
 
 1. **Packet capture on the host's real interface** during a full session. The
    only traffic to a non-loopback address must be UDP to the WireGuard
-   endpoint. Port 53 to anything is a failure. Port 6881 to anything is a
+   endpoint. Port 53 to anything is a failure. Any other connections are a
    failure.
 2. **A DNS server that logs**, pointed at by `wireguard.dns`. Every DHT
    bootstrap host, tracker host and webseed host must appear in its log and in
    no other resolver's.
-3. **A deliberately broken tunnel** (a wrong `peer_public_key`): the daemon
-   must fail to reach peers rather than quietly succeeding.
-4. A TorrentDyne probe, and the two unroutable-destination cases - sending to
-   an IPv6 destination on a v4-only tunnel must not kill the socket for
-   subsequent v4 sends.
+3. **A deliberately broken tunnel** (a wrong `peer_public_key`). The daemon
+   must fail to reach anything.
