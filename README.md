@@ -110,7 +110,28 @@ bittrench -config C:\ProgramData\bittrench\config.toml install
 bittrench uninstall
 ```
 
-The config path must be absolute.
+The config path must be absolute, because the SCM runs services from
+`C:\Windows\System32` and the state database and log directory are resolved
+beside the config file.
+
+Running `install` again **updates** the registration rather than refusing. It
+removes and recreates the service, which means:
+
+- The executable path is rewritten, so moving `bittrench.exe` and re-running
+  `install` is how you point the service at its new location. A service is always
+  registered by full path.
+- The `-config` path, start type, display name and description are rewritten too.
+- Anything customised by hand in `services.msc`, such as recovery actions or a
+  non-default log-on account, goes back to its default. `install` warns when it
+  has replaced a registration.
+- A service that was running is stopped, recreated and started again. One that
+  was stopped stays stopped unless you pass `-start-now`.
+
+There is no `-name` on `install`: one machine, one daemon. Two services sharing
+this binary would share its configuration, and with it one state database and one
+API port. If another service on the machine already runs this executable,
+`install` refuses and tells you which one and how to remove it. `uninstall` still
+takes `-name`, so a stray from an older version can be cleaned up.
 
 ## Layout
 

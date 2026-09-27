@@ -9,7 +9,7 @@ import "errors"
 var errNotWindows = errors.New("service management is only supported on Windows")
 
 // Install is unsupported off Windows.
-func Install(InstallOptions) error { return errNotWindows }
+func Install(InstallOptions) (bool, error) { return false, errNotWindows }
 
 // Uninstall is unsupported off Windows.
 func Uninstall(UninstallOptions) error { return errNotWindows }

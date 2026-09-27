@@ -47,8 +47,11 @@ usage:
                                                print the response (default:
                                                https://api.ipify.org, which
                                                prints the exit IP)
-  bittrench [-config PATH] install [-name N] [-manual] [-start-now]
-                                               register a Windows service
+  bittrench [-config PATH] install [-manual] [-start-now]
+                                               register the Windows service, or
+                                               re-register it if it is already
+                                               installed, pointing it at the
+                                               running binary
   bittrench uninstall [-name N] [-no-stop] remove the Windows service
   bittrench [-config PATH] serve           run under the Windows SCM
                                                (invoked by the SCM itself)
@@ -74,11 +77,16 @@ func main() {
 	flag.Parse()
 
 	absConfig, configErr := resolveConfigPath(*configPath)
-	// Every command except uninstall needs to know where the config is, and
-	// uninstall must keep working on a machine that has none: it takes a service
-	// name, not a configuration.
-	if configErr != nil && flag.Arg(0) != "uninstall" {
-		fatal(configErr)
+	// Not finding a config is only fatal here for the commands that read one and
+	// have no flags of their own. uninstall takes a service name rather than a
+	// configuration, and install and get parse their own flags first so that
+	// `install -h` still works on a machine with no config at all.
+	switch flag.Arg(0) {
+	case "uninstall", "install", "get":
+	default:
+		if configErr != nil {
+			fatal(configErr)
+		}
 	}
 
 	var err error
@@ -99,11 +107,11 @@ func main() {
 	case "serve":
 		err = serveUnderSCM(absConfig)
 	case "install":
-		err = installService(absConfig, flag.Args()[1:])
+		err = installService(absConfig, configErr, flag.Args()[1:])
 	case "uninstall":
 		err = uninstallService(flag.Args()[1:])
 	case "get":
-		err = get(ctx, absConfig, flag.Args()[1:])
+		err = get(ctx, absConfig, configErr, flag.Args()[1:])
 	case "dial-through":
 		url := flag.Arg(1)
 		if url == "" {
@@ -311,7 +319,7 @@ const (
 // run has no business starting to seed everything the daemon knows about. The
 // torrent itself is still recorded, so an interrupted `get` resumes rather than
 // starting over, and the daemon proper picks it up on its next start.
-func get(ctx context.Context, configPath string, args []string) error {
+func get(ctx context.Context, configPath string, configErr error, args []string) error {
 	fs := flag.NewFlagSet("get", flag.ContinueOnError)
 	dir := fs.String("dir", "", "download directory (default: the [torrent] save_path)")
 	timeout := fs.Duration("timeout", 0, "give up after this long, e.g. 30m (default: wait indefinitely)")
@@ -321,6 +329,10 @@ func get(ctx context.Context, configPath string, args []string) error {
 	if fs.NArg() != 1 {
 		return errors.New("get takes exactly one torrent: a magnet URI, an http(s) URL, " +
 			"or a path to a .torrent file")
+	}
+	// After parsing, so -h prints the flags rather than a missing config.
+	if configErr != nil {
+		return configErr
 	}
 	req, err := addRequest(fs.Arg(0), *dir)
 	if err != nil {
@@ -449,9 +461,15 @@ func serveUnderSCM(configPath string) error {
 	})
 }
 
-func installService(configPath string, args []string) error {
+// installService registers the service, or re-registers it if it is already
+// there.
+//
+// There is deliberately no -name: one machine, one daemon. Two services sharing
+// this binary would share its configuration, and with it one state database and
+// one API port. uninstall still takes a name, so a stray from an older version
+// can be removed.
+func installService(configPath string, configErr error, args []string) error {
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
-	name := fs.String("name", service.DefaultName, "service name to register under")
 	display := fs.String("display-name", service.DefaultDisplayName, "name shown in services.msc")
 	description := fs.String("description", service.DefaultDescription, "description shown in services.msc")
 	manual := fs.Bool("manual", false, "start on demand rather than at boot")
@@ -459,17 +477,33 @@ func installService(configPath string, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if err := service.Install(service.InstallOptions{
-		Name:        *name,
+	// After parsing, so -h prints the flags rather than a missing config.
+	if configErr != nil {
+		return configErr
+	}
+	replaced, err := service.Install(service.InstallOptions{
+		Name:        service.DefaultName,
 		DisplayName: *display,
 		Description: *description,
 		AutoStart:   !*manual,
 		StartNow:    *startNow,
 		ConfigPath:  configPath,
-	}); err != nil {
+	})
+	if err != nil {
 		return err
 	}
-	fmt.Printf("installed the service %q with -config %s\n", *name, configPath)
+	if replaced {
+		fmt.Fprintf(os.Stderr, "warning: replaced the existing %q registration. "+
+			"An update removes and recreates the service, so anything customised by "+
+			"hand in services.msc (recovery actions, the log-on account) is back to "+
+			"its default. A service that was running has been started again.\n",
+			service.DefaultName)
+	}
+	fmt.Printf("installed the service %q\n", service.DefaultName)
+	if exe, err := os.Executable(); err == nil {
+		fmt.Printf("  exe:    %s\n", exe)
+	}
+	fmt.Printf("  config: %s\n", configPath)
 	return nil
 }
 
