@@ -12,3 +12,59 @@ biome = "latest"
 # one persistence backend, not two, is the point.
 GOFLAGS = "-tags=noboltdb"
 CGO_ENABLED = "0"
+
+# Tasks. Everything here runs through mise, so the pinned toolchain and the two
+# env settings above apply - which is the whole reason the tasks exist rather
+# than a README section listing `mise exec -- go ...` lines.
+
+[tasks.build]
+description = "Build every package for this host"
+run = "go build ./..."
+
+[tasks.test]
+description = "Run the full test suite (~10s; no network, VPN or privileges needed)"
+run = "go test ./..."
+
+[tasks.fmt]
+description = "Format the Go sources and the embedded web UI"
+run = ["gofmt -w cmd internal", "biome check --write internal/webui/assets/"]
+
+[tasks.check]
+description = "Everything CI checks: formatting, vet for both GOOSes, biome, deps, tests"
+run = [
+  # gofmt exits 0 whether or not it names a file, so the naming is the failure.
+  """
+  unformatted=$(gofmt -l cmd internal)
+  if [ -n "$unformatted" ]; then echo "gofmt needs to run on:"; echo "$unformatted"; exit 1; fi
+  """,
+  "go vet ./...",
+  # The Windows service code is build-tagged, so the host vet never compiles it.
+  "env GOOS=windows go vet ./...",
+  "biome check internal/webui/assets/",
+  # bbolt, go-llsqlite and zombiezen must stay out of the build.
+  """
+  found=$(go list -deps ./... | grep -Ei "bbolt|llsqlite|zombiezen" || true)
+  if [ -n "$found" ]; then echo "unwanted dependencies in the build:"; echo "$found"; exit 1; fi
+  """,
+  "go test ./...",
+]
+
+# The release build: every target cross-compiles from one host because
+# CGO_ENABLED=0 keeps the SQLite driver pure Go. -trimpath strips the build
+# directory out of the binary, which is also one less thing leaking a local path.
+[tasks.release]
+description = "Cross-compile stripped release binaries for every target into dist/"
+run = """
+set -e
+mkdir -p dist
+for target in linux/amd64 linux/arm64 darwin/arm64 windows/amd64; do
+  goos=${target%/*}
+  goarch=${target#*/}
+  ext=""
+  [ "$goos" = "windows" ] && ext=".exe"
+  echo "building $goos/$goarch"
+  env GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="-s -w" \
+    -o "dist/bittrench-$goos-$goarch$ext" ./cmd/bittrench
+done
+ls -l dist
+"""

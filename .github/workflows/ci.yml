@@ -13,6 +13,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: jdx/mise-action@v4
+      # The same commands mise run check uses, kept as separate steps here so a
+      # failure names which one.
       - name: gofmt
         run: |
           unformatted=$(mise exec -- gofmt -l cmd internal)
@@ -89,8 +91,8 @@ jobs:
             ${{ steps.gocache.outputs.build }}
           key: test-${{ runner.os }}-${{ hashFiles('go.sum') }}
           restore-keys: test-${{ runner.os }}-
-      - run: mise exec -- go build ./...
+      - run: mise run build
       # The suite stands up two real WireGuard devices over loopback with an
       # in-tunnel DNS server. It needs no network, no VPN and no privileges, so
       # a failure here is a real one.
-      - run: mise exec -- go test ./...
+      - run: mise run test

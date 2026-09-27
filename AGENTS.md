@@ -7,11 +7,17 @@ runs inside the tunnel.
 
 ## Before committing
 
-ALWAYS run `mise exec -- gofmt -l cmd internal` and fix every file it names
-ALWAYS run `mise exec -- go vet ./...` and fix every finding
-ALWAYS run `mise exec -- go test ./...` and have it pass
-ALWAYS run `mise exec -- biome check --write` and then `biome check` after editing anything under `internal/webui/assets/`
+ALWAYS run `mise run check` and have it pass - it is every check CI runs:
+`gofmt`, `go vet` for this host *and* for Windows (the service code is
+build-tagged, so a host-only vet never compiles it), `biome` over the embedded
+web UI, the dependency-budget check, and the tests
+ALWAYS run `mise run fmt` after editing anything under `internal/webui/assets/`
 NEVER mix a formatting-only change into a behavioural one - separate commits
+
+`mise tasks` lists them all: `build`, `test`, `fmt`, `check`, and `release`,
+which cross-compiles the stripped binaries for every target into `dist/`. Use
+the tasks rather than bare `go` commands - they run through mise, so the pinned
+toolchain and the two env settings below apply.
 
 ## Tests
 

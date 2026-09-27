@@ -18,10 +18,16 @@ The toolchain is pinned with mise, which also fixes `CGO_ENABLED=0` and
 `-tags=noboltdb` - both deliberate, see `AGENTS.md`.
 
 ```sh
-mise exec -- go build ./...
-mise exec -- go test ./...
+mise run build     # every package, for this host
+mise run test      # the full suite, ~10s, no network or VPN
+mise run check     # everything CI checks
+mise run release   # stripped binaries for every target, into dist/
 mise exec -- go run ./cmd/bittrench -config /path/to/config.toml
 ```
+
+`mise tasks` lists them. They run through mise, so the pinned toolchain and the
+`CGO_ENABLED=0` / `-tags=noboltdb` settings apply - which is why `release` can
+cross-compile every target from one machine with no C toolchain.
 
 Copy `config.sample.toml` to `config.toml` and fill in the `[wireguard]`
 section from your provider's configuration. `wireguard.dns` is **required**:

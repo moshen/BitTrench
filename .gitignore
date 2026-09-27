@@ -8,3 +8,6 @@
 /state.db-shm
 /state.db-wal
 /logs/
+
+# Release binaries, from `mise run release`.
+/dist/
