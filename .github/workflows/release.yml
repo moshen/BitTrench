@@ -180,3 +180,78 @@ jobs:
             --title "${{ needs.version.outputs.version }}" \
             --generate-notes \
             artifacts/*
+
+  # The bucket lives in its own repo so scoop users can add it without cloning
+  # BitTrench, which means pushing across a repository boundary: GITHUB_TOKEN is
+  # scoped to this repo only, hence a deploy key held as a secret here whose
+  # public half has write access there.
+  scoop:
+    name: Update the scoop bucket
+    needs: [version, release]
+    runs-on: ubuntu-latest
+    # SCOOP_DEPLOY_KEY is an environment secret, so without this the job sees
+    # an empty string and skips. The environment's branch policy allows main,
+    # which is the only branch this workflow runs for.
+    environment: Release
+    steps:
+      # A missing key is not a reason to fail a release that already published.
+      # The warning is so a key that gets revoked later is still noticed.
+      - name: Look for the deploy key
+        id: key
+        env:
+          DEPLOY_KEY: ${{ secrets.SCOOP_DEPLOY_KEY }}
+        run: |
+          if [ -z "${DEPLOY_KEY:-}" ]; then
+            echo "::warning::SCOOP_DEPLOY_KEY is unset; leaving the scoop bucket alone"
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Point the manifest at this release
+        if: steps.key.outputs.present == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.version.outputs.version }}
+          DEPLOY_KEY: ${{ secrets.SCOOP_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          ASSET=bittrench-windows-amd64.zip
+
+          # Hash the asset as published rather than rebuilding it here, so the
+          # manifest describes the exact bytes scoop will download.
+          gh release download "$VERSION" --pattern "$ASSET" --dir "$RUNNER_TEMP"
+          HASH=$(sha256sum "$RUNNER_TEMP/$ASSET" | cut -d' ' -f1)
+          echo "$ASSET sha256 $HASH"
+
+          KEY="$RUNNER_TEMP/scoop_deploy_key"
+          install -m 600 /dev/null "$KEY"
+          printf '%s\n' "$DEPLOY_KEY" > "$KEY"
+          # IdentitiesOnly so a runner's own agent keys are never tried, and the
+          # clone below is the only thing this key is ever used for.
+          export GIT_SSH_COMMAND="ssh -i $KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+
+          git clone --depth 1 git@github.com:moshen/BitTrench-scoop.git "$RUNNER_TEMP/bucket"
+          cd "$RUNNER_TEMP/bucket"
+          # --indent 4 matches how scoop buckets are written, so a release
+          # rewrites three values instead of reformatting the whole manifest.
+          jq --indent 4 --arg v "$VERSION" --arg h "$HASH" '
+            .version = $v
+            | .architecture["64bit"].url =
+                "https://github.com/moshen/BitTrench/releases/download/\($v)/bittrench-windows-amd64.zip"
+            | .architecture["64bit"].hash = $h
+          ' bucket/bittrench.json > bucket/bittrench.json.new
+          mv bucket/bittrench.json.new bucket/bittrench.json
+          git --no-pager diff
+
+          # A re-run of a release that already updated the bucket should be a
+          # no-op rather than an empty commit.
+          if git diff --quiet; then
+            echo "The manifest already describes $VERSION."
+            exit 0
+          fi
+          git -c user.name='github-actions[bot]' \
+              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              commit -qam "bittrench: $VERSION"
+          git push
