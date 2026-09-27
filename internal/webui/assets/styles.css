@@ -406,6 +406,14 @@ dialog .actions {
 .status-dot.initializing {
 	background: #f59e0b;
 }
+/* Waiting for a download slot: the outline says "nothing is happening yet",
+   the same way the paused dot does, without borrowing its colour. */
+.status-dot.queued {
+	background: transparent;
+	border: 2px solid var(--muted);
+	width: 8px;
+	height: 8px;
+}
 .status-icon {
 	display: inline-flex;
 	width: 14px;

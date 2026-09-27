@@ -75,8 +75,11 @@ type Torrent struct {
 	InfoHash string `json:"info_hash"`
 	State    string `json:"state"`
 	Paused   bool   `json:"paused"`
-	Error    string `json:"error,omitempty"`
-	SavePath string `json:"save_path"`
+	// QueuePosition is the torrent's place in the download queue, counted from
+	// zero, so the UI can say which one it is waiting behind.
+	QueuePosition int    `json:"queue_position"`
+	Error         string `json:"error,omitempty"`
+	SavePath      string `json:"save_path"`
 
 	TotalBytes     int64 `json:"total_bytes"`
 	CompletedBytes int64 `json:"completed_bytes"`
@@ -112,6 +115,7 @@ func torrentOf(s engine.Status) Torrent {
 		Name:           s.Name,
 		InfoHash:       s.InfoHash.HexString(),
 		State:          string(s.State),
+		QueuePosition:  s.QueuePosition,
 		Paused:         s.Paused,
 		Error:          s.Error,
 		SavePath:       s.SavePath,

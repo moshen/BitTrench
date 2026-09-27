@@ -54,7 +54,10 @@ func start(t *testing.T, customise func(*config.AppConfig)) (*Server, string) {
 	if customise != nil {
 		customise(&cfg)
 	}
-	srv, err := New(&cfg, &stubEngine{torrents: []engine.Status{{ID: 1, Name: "one"}}})
+	srv, err := New(&cfg, &stubEngine{torrents: []engine.Status{{
+		ID: 1, Name: "one", State: engine.StateQueued, Queued: true, QueuePosition: 2,
+		TotalBytes: 1000, CompletedBytes: 400, SizeWhenDone: 800, LeftUntilDone: 400,
+	}}})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -110,7 +113,19 @@ func TestServesTheNativeAPI(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 	if len(payload.Torrents) != 1 || payload.Torrents[0].Name != "one" {
-		t.Errorf("torrents = %+v", payload.Torrents)
+		t.Fatalf("torrents = %+v", payload.Torrents)
+	}
+	// The web UI takes progress from the wanted figures and names the queue
+	// position, so all three have to reach it.
+	got := payload.Torrents[0]
+	if got.SizeWhenDone != 800 || got.LeftUntilDone != 400 {
+		t.Errorf("wanted figures = %d/%d, want 800/400", got.LeftUntilDone, got.SizeWhenDone)
+	}
+	if got.QueuePosition != 2 {
+		t.Errorf("queue_position = %d, want 2", got.QueuePosition)
+	}
+	if got.State != string(engine.StateQueued) {
+		t.Errorf("state = %q, want %q", got.State, engine.StateQueued)
 	}
 }
 

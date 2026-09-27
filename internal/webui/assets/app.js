@@ -193,24 +193,35 @@ function fmtRatio(r) {
 	return r.toFixed(2);
 }
 
-function statusDot(state) {
-	const cls =
-		state === "downloading"
-			? "live"
-			: state === "seeding"
-				? "finished"
-				: state === "stopped"
-					? "paused"
-					: state === "error"
-						? "error"
-						: "initializing";
-	return `<span class="status-dot ${cls}" title="${escapeHtml(state)}"></span>`;
+// The class names are the stylesheet's vocabulary, which is deliberately not the
+// API's: "live" is how a downloading torrent is drawn, not what the daemon calls
+// it. Mapping one to the other in one place is what keeps the two from drifting
+// - they had, and three filters and the start button were comparing state
+// strings against class names that no state ever equals.
+const stateClass = {
+	downloading: "live",
+	seeding: "finished",
+	stopped: "paused",
+	queued: "queued",
+	error: "error",
+	initializing: "initializing",
+};
+
+function statusDot(t) {
+	const state = torrentState(t);
+	const cls = stateClass[state] || "initializing";
+	const label =
+		state === "queued"
+			? `queued (${(t.queue_position || 0) + 1} in line)`
+			: state;
+	return `<span class="status-dot ${cls}" title="${escapeHtml(label)}"></span>`;
 }
 
 function progressClass(t) {
 	const s = torrentState(t);
 	if (s === "error") return "error";
-	if (s === "stopped") return "paused";
+	// A queued torrent's bar is drawn like a paused one: nothing is moving.
+	if (s === "stopped" || s === "queued") return "paused";
 	if (torrentFinished(t)) return "done";
 	return "";
 }
@@ -280,10 +291,10 @@ function buildRow(t) {
 	const tr = document.createElement("tr");
 	tr.className = "torrent-row";
 	if (state.expanded.has(id)) tr.classList.add("selected");
-	if (torrentState(t) === "paused") tr.classList.add("paused");
+	if (torrentState(t) === "stopped") tr.classList.add("paused");
 	tr.dataset.id = id;
 	tr.innerHTML =
-		`<td class="cell-status">${statusDot(torrentState(t))}</td>` +
+		`<td class="cell-status">${statusDot(t)}</td>` +
 		`<td class="name">${escapeHtml(torrentName(t))}</td>` +
 		`<td><div class="progress-cell"><div class="progress ${cls}"><div class="bar" style="width:${pct.toFixed(2)}%"></div></div>` +
 		`<span class="pct">${pct.toFixed(2)}%</span></div></td>` +
@@ -302,10 +313,10 @@ function updateRowInPlace(tr, t) {
 	const id = torrentId(t);
 	const tState = torrentState(t);
 	tr.classList.toggle("selected", state.expanded.has(id));
-	tr.classList.toggle("paused", tState === "paused");
+	tr.classList.toggle("paused", tState === "stopped");
 	if (tr.dataset.id !== id) tr.dataset.id = id;
 	const cells = tr.children;
-	cells[0].innerHTML = statusDot(tState);
+	cells[0].innerHTML = statusDot(t);
 	cells[1].textContent = torrentName(t);
 	const pct = torrentProgressPct(t);
 	const cell = cells[2];
@@ -423,10 +434,10 @@ function filterAndSort(list) {
 	if (state.filter !== "all") {
 		r = r.filter((t) => {
 			const s = torrentState(t);
-			const fin = t.stats?.finished;
-			if (state.filter === "live") return s === "live" && !fin;
-			if (state.filter === "paused") return s === "paused";
-			if (state.filter === "finished") return s !== "error" && fin;
+			if (state.filter === "live") return s === "downloading";
+			if (state.filter === "queued") return s === "queued";
+			if (state.filter === "paused") return s === "stopped";
+			if (state.filter === "finished") return torrentFinished(t);
 			if (state.filter === "error") return s === "error";
 			return true;
 		});
@@ -742,7 +753,7 @@ tbody.addEventListener("click", (ev) => {
 		const id = tr.dataset.id;
 		if (btn.dataset.act === "pause") {
 			const t = state.torrents.find((x) => torrentId(x) === id);
-			if (t && torrentState(t) === "paused") actionStart(id);
+			if (t && torrentState(t) === "stopped") actionStart(id);
 			else actionPause(id);
 		} else if (btn.dataset.act === "delete") {
 			actionDelete(id);
