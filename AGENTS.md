@@ -15,9 +15,10 @@ ALWAYS run `mise run fmt` after editing anything under `internal/webui/assets/`
 NEVER mix a formatting-only change into a behavioural one - separate commits
 
 `mise tasks` lists them all: `build`, `test`, `fmt`, `check`, and `release`,
-which cross-compiles the stripped binaries for every target into `dist/`. Use
-the tasks rather than bare `go` commands - they run through mise, so the pinned
-toolchain and the two env settings below apply.
+which cross-compiles the stripped binaries for every target into
+`dist/<goos>-<goarch>/`, one release-ready directory each. Use the tasks rather
+than bare `go` commands - they run through mise, so the pinned toolchain and the
+two env settings below apply.
 
 ## Tests
 
