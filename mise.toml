@@ -10,13 +10,7 @@ biome = "latest"
 # fallback. We supply our own SQLite-backed storage.PieceCompletion and never
 # call NewDefaultPieceCompletionForDir, so the fallback is dead weight - and
 # one persistence backend, not two, is the point.
-#
-# `http2legacy` keeps golang.org/x/net/http2 compiling its own HTTP/2 code
-# rather than wrapping net/http's. Under Go 1.27 the wrapper is the default and
-# it drops http2.GoAwayError, which anacrolix/torrent references to pick a log
-# level for webseed GOAWAYs - so without the tag the dependency stops building.
-# Drop this once anacrolix/torrent no longer needs GoAwayError.
-GOFLAGS = "-tags=noboltdb,http2legacy"
+GOFLAGS = "-tags=noboltdb"
 CGO_ENABLED = "0"
 
 # Tasks. Everything here runs through mise, so the pinned toolchain and the two
