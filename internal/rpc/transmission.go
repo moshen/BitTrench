@@ -20,13 +20,16 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"sort"
-	"strconv"
+	"strings"
 	"time"
+
+	"github.com/anacrolix/torrent/metainfo"
 
 	"github.com/moshen/bittrench/internal/config"
 	"github.com/moshen/bittrench/internal/engine"
@@ -360,7 +363,7 @@ func (h *Handler) torrentGet(raw json.RawMessage) (any, error) {
 			return nil, fmt.Errorf("invalid arguments: %w", err)
 		}
 	}
-	ids, filtered, err := parseIDs(args.IDs)
+	sel, err := parseIDs(args.IDs)
 	if err != nil {
 		return nil, err
 	}
@@ -379,7 +382,7 @@ func (h *Handler) torrentGet(raw json.RawMessage) (any, error) {
 
 	torrents := make([]map[string]any, 0)
 	for _, s := range h.engine.List() {
-		if filtered && !ids[s.ID] {
+		if !sel.has(s) {
 			continue
 		}
 		var files []engine.File
@@ -440,13 +443,13 @@ func (h *Handler) torrentSet(ctx context.Context, raw json.RawMessage) (any, err
 			return nil, fmt.Errorf("invalid arguments: %w", err)
 		}
 	}
-	ids, filtered, err := parseIDs(args.IDs)
+	sel, err := parseIDs(args.IDs)
 	if err != nil {
 		return nil, err
 	}
 
 	for _, s := range h.engine.List() {
-		if filtered && !ids[s.ID] {
+		if !sel.has(s) {
 			continue
 		}
 		if args.Labels != nil {
@@ -529,14 +532,14 @@ func (h *Handler) queueMove(ctx context.Context, raw json.RawMessage, move engin
 			return nil, fmt.Errorf("invalid arguments: %w", err)
 		}
 	}
-	ids, filtered, err := parseIDs(args.IDs)
+	sel, err := parseIDs(args.IDs)
 	if err != nil {
 		return nil, err
 	}
 
-	selected := make([]engine.Status, 0, len(ids))
+	var selected []engine.Status
 	for _, s := range h.engine.List() {
-		if filtered && !ids[s.ID] {
+		if !sel.has(s) {
 			continue
 		}
 		selected = append(selected, s)
@@ -569,12 +572,12 @@ func (h *Handler) torrentRemove(ctx context.Context, raw json.RawMessage) (any, 
 			return nil, fmt.Errorf("invalid arguments: %w", err)
 		}
 	}
-	ids, filtered, err := parseIDs(args.IDs)
+	sel, err := parseIDs(args.IDs)
 	if err != nil {
 		return nil, err
 	}
 	for _, s := range h.engine.List() {
-		if filtered && !ids[s.ID] {
+		if !sel.has(s) {
 			continue
 		}
 		if err := h.engine.Remove(ctx, s.ID, args.DeleteLocalData); err != nil {
@@ -605,12 +608,12 @@ func (h *Handler) torrentSetPaused(ctx context.Context, raw json.RawMessage, pau
 			return nil, fmt.Errorf("invalid arguments: %w", err)
 		}
 	}
-	ids, filtered, err := parseIDs(args.IDs)
+	sel, err := parseIDs(args.IDs)
 	if err != nil {
 		return nil, err
 	}
 	for _, s := range h.engine.List() {
-		if filtered && !ids[s.ID] {
+		if !sel.has(s) {
 			continue
 		}
 		var err error
@@ -626,15 +629,37 @@ func (h *Handler) torrentSetPaused(ctx context.Context, raw json.RawMessage, pau
 	return nil, nil
 }
 
-// parseIDs accepts both integers and strings, in every method.
+// idSelector is the set of torrents a request's ids name.
+type idSelector struct {
+	all    bool
+	ids    map[int64]bool
+	hashes map[string]bool
+}
+
+func (sel idSelector) has(s engine.Status) bool {
+	return sel.all || sel.ids[s.ID] || sel.hashes[s.InfoHash.HexString()]
+}
+
+// parseIDs accepts integers and info-hashes, in every method.
 //
-// The Transmission RPC spec allows either, and clients use both. A previous
-// version of this endpoint accepted only strings in torrent-get, so
+// Those are the two forms the [Transmission RPC spec] allows. A previous
+// version of this endpoint accepted only numeric strings in torrent-get, so
 // `{"ids":[0]}` silently matched nothing - the torrent looked like it had
-// vanished. filtered is false when no ids were given, which means "all".
-func parseIDs(raw json.RawMessage) (ids map[int64]bool, filtered bool, err error) {
+// vanished. Another accepted no hashes, which are what Sonarr sends to
+// torrent-remove, torrent-set and queue-move-top, so removing a download from
+// its queue failed with "invalid torrent id". Numeric strings are refused:
+// Transmission reads a string as a hash or a magnet link, so "1" matches
+// nothing there and no client that works against it can be sending one.
+//
+// Only an absent ids key, or the recently-active selector, means every
+// torrent. An empty list or a hash nobody has selects nothing, as it does in
+// Transmission: this parser feeds torrent-remove with delete-local-data, where
+// reading "no match" as "all" deletes everything.
+//
+// [Transmission RPC spec]: https://github.com/transmission/transmission/blob/main/docs/rpc-spec.md#31-torrent-action-requests
+func parseIDs(raw json.RawMessage) (idSelector, error) {
 	if len(raw) == 0 || string(raw) == "null" {
-		return nil, false, nil
+		return idSelector{all: true}, nil
 	}
 	var entries []json.RawMessage
 	if err := json.Unmarshal(raw, &entries); err != nil {
@@ -643,32 +668,40 @@ func parseIDs(raw json.RawMessage) (ids map[int64]bool, filtered bool, err error
 		entries = []json.RawMessage{single}
 	}
 
-	ids = make(map[int64]bool, len(entries))
+	sel := idSelector{ids: map[int64]bool{}, hashes: map[string]bool{}}
 	for _, entry := range entries {
 		var n int64
 		if err := json.Unmarshal(entry, &n); err == nil {
-			ids[n] = true
+			sel.ids[n] = true
 			continue
 		}
 		var s string
 		if err := json.Unmarshal(entry, &s); err != nil {
-			return nil, false, fmt.Errorf("invalid torrent id %s", entry)
+			return idSelector{}, fmt.Errorf("invalid torrent id %s", entry)
 		}
 		// "recently-active" is a Transmission selector we do not implement;
 		// treating it as "all" is closer to right than matching nothing.
-		if s == "recently-active" {
-			return nil, false, nil
+		// The current spec spells it "recently_active", after Transmission
+		// moved its RPC keys to snake_case; clients written against either
+		// version send their own spelling. See section 3.1 of
+		// https://github.com/transmission/transmission/blob/main/docs/rpc-spec.md
+		if s == "recently-active" || s == "recently_active" {
+			return idSelector{all: true}, nil
 		}
-		parsed, err := strconv.ParseInt(s, 10, 64)
-		if err != nil {
-			return nil, false, fmt.Errorf("invalid torrent id %q", s)
+		// Clients echo hashString back, which is lowercase here, but magnet
+		// links carry uppercase hashes and nothing stops a client using those.
+		if len(s) == 2*len(metainfo.Hash{}) && isHex(s) {
+			sel.hashes[strings.ToLower(s)] = true
+			continue
 		}
-		ids[parsed] = true
+		return idSelector{}, fmt.Errorf("invalid torrent id %q", s)
 	}
-	if len(ids) == 0 {
-		return nil, false, nil
-	}
-	return ids, true, nil
+	return sel, nil
+}
+
+func isHex(s string) bool {
+	_, err := hex.DecodeString(s)
+	return err == nil
 }
 
 // torrentFields is the full field set. Projection to the client's `fields`

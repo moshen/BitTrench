@@ -11,8 +11,10 @@ package rpc
 //   - session-get must report a version Radarr's regex accepts (>= 2.40) and a
 //     usable download-dir, or Sonarr's GetDownloadDirectory returns null and
 //     per-category paths silently break.
-//   - ids accept integers *and* strings, in every method. torrent-get once
-//     accepted only strings, so {"ids":[0]} matched nothing at all.
+//   - ids accept integers *and* info-hashes, in every method. torrent-get
+//     once accepted only numeric strings, so {"ids":[0]} matched nothing at
+//     all; and hashes, which Sonarr sends to torrent-remove, torrent-set and
+//     queue-move-top, were once rejected as "invalid torrent id".
 
 import (
 	"context"
@@ -329,19 +331,16 @@ func TestSessionGetDisablesLimitsAtZero(t *testing.T) {
 	}
 }
 
-// The ids field accepts integers and strings, in every method. This is the bug
-// that made {"ids":[0]} match nothing.
-func TestIDsAcceptIntegersAndStrings(t *testing.T) {
+// The ids field accepts integers, in every method. This is the bug that made
+// {"ids":[0]} match nothing.
+func TestIDsAcceptIntegers(t *testing.T) {
 	for _, c := range []struct {
 		name string
 		ids  any
 		want []int64
 	}{
 		{"integers", []any{1, 3}, []int64{1, 3}},
-		{"strings", []any{"1", "3"}, []int64{1, 3}},
-		{"mixed", []any{1, "3"}, []int64{1, 3}},
 		{"a bare integer", 2, []int64{2}},
-		{"a bare string", "2", []int64{2}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			eng := newFakeEngine()
@@ -378,6 +377,123 @@ func TestIDsAcceptIntegersAndStrings(t *testing.T) {
 	}
 }
 
+// Sonarr names torrents by hashString, not id, in torrent-remove, torrent-set
+// and queue-move-top. Rejecting the hash failed its queue removal outright.
+func TestIDsAcceptInfoHashes(t *testing.T) {
+	hashes := make([]metainfo.Hash, 3)
+	for i := range hashes {
+		hashes[i][0], hashes[i][19] = 0xc5, byte(i)
+	}
+	newEngine := func() *fakeEngine {
+		eng := newFakeEngine()
+		for i, hash := range hashes {
+			eng.torrents = append(eng.torrents, engine.Status{ID: int64(i + 1), InfoHash: hash})
+		}
+		return eng
+	}
+	second := hashes[1].HexString()
+
+	for _, c := range []struct {
+		name string
+		ids  any
+	}{
+		{"a hash", []any{second}},
+		{"an uppercase hash", []any{strings.ToUpper(second)}},
+		{"a bare hash", second},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			eng := newEngine()
+			h := newHandler(t, eng, nil)
+
+			args, result := call(t, h, "torrent-get", map[string]any{"ids": c.ids, "fields": []string{"id"}})
+			if result != "success" {
+				t.Fatalf("torrent-get result = %q", result)
+			}
+			list, _ := args["torrents"].([]any)
+			if len(list) != 1 || list[0].(map[string]any)["id"] != float64(2) {
+				t.Errorf("torrent-get matched %v, want only torrent 2", list)
+			}
+
+			if _, result := call(t, h, "torrent-set", map[string]any{"ids": c.ids, "labels": []string{"tv"}}); result != "success" {
+				t.Fatalf("torrent-set result = %q", result)
+			}
+			if len(eng.labelsSet) != 1 || eng.labelsSet[2] == nil {
+				t.Errorf("torrent-set labelled %v, want only torrent 2", eng.labelsSet)
+			}
+
+			if _, result := call(t, h, "queue-move-top", map[string]any{"ids": c.ids}); result != "success" {
+				t.Fatalf("queue-move-top result = %q", result)
+			}
+			if len(eng.moves) != 1 || eng.moves[0].ID != 2 {
+				t.Errorf("queue-move-top moved %v, want only torrent 2", eng.moves)
+			}
+
+			if _, result := call(t, h, "torrent-remove", map[string]any{"ids": c.ids, "delete-local-data": true}); result != "success" {
+				t.Fatalf("torrent-remove result = %q", result)
+			}
+			if len(eng.removed) != 1 || !eng.removed[2] {
+				t.Errorf("torrent-remove removed %v, want only torrent 2", eng.removed)
+			}
+		})
+	}
+}
+
+// An ids list that names nothing present selects nothing. Only an absent ids
+// key means every torrent: torrent-remove deletes data, and reading "no match"
+// as "all" there would delete every download.
+func TestIDsMatchingNothingSelectNothing(t *testing.T) {
+	var unknown metainfo.Hash
+	unknown[0] = 0xff
+	for _, c := range []struct {
+		name string
+		ids  any
+	}{
+		{"an empty list", []any{}},
+		{"an unknown hash", []any{unknown.HexString()}},
+		{"an unknown id", []any{99}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			eng := newFakeEngine()
+			eng.torrents = []engine.Status{{ID: 1}, {ID: 2}}
+			h := newHandler(t, eng, nil)
+
+			if _, result := call(t, h, "torrent-remove", map[string]any{"ids": c.ids, "delete-local-data": true}); result != "success" {
+				t.Fatalf("result = %q", result)
+			}
+			if len(eng.removed) != 0 {
+				t.Errorf("torrent-remove removed %v, want nothing", eng.removed)
+			}
+		})
+	}
+}
+
+// A string that is not a hash is an error, rather than something that quietly
+// matches nothing. That includes a numeric string: Transmission never reads
+// "1" as torrent 1, so accepting it here would only hide a client bug.
+func TestIDsRejectGarbage(t *testing.T) {
+	eng := newFakeEngine()
+	eng.torrents = []engine.Status{{ID: 1}, {ID: 3}}
+	h := newHandler(t, eng, nil)
+	for _, ids := range []any{
+		[]any{"not-an-id"},
+		[]any{strings.Repeat("z", 40)},
+		[]any{"c5a670b7"},
+		[]any{"1"},
+		[]any{1, "3"},
+		"1",
+	} {
+		if _, result := call(t, h, "torrent-get", map[string]any{"ids": ids}); !strings.Contains(result, "invalid torrent id") {
+			t.Errorf("ids %v: result = %q, want an invalid torrent id error", ids, result)
+		}
+		if _, result := call(t, h, "torrent-remove", map[string]any{"ids": ids}); !strings.Contains(result, "invalid torrent id") {
+			t.Errorf("torrent-remove ids %v: result = %q, want an invalid torrent id error", ids, result)
+		}
+	}
+	if len(eng.removed) != 0 {
+		t.Errorf("a refused torrent-remove still removed %v", eng.removed)
+	}
+}
+
 // No ids at all means every torrent.
 func TestNoIDsMeansAllTorrents(t *testing.T) {
 	eng := newFakeEngine()
@@ -387,6 +503,28 @@ func TestNoIDsMeansAllTorrents(t *testing.T) {
 	args, _ := call(t, h, "torrent-get", map[string]any{"fields": []string{"id"}})
 	if list, _ := args["torrents"].([]any); len(list) != 2 {
 		t.Errorf("no ids matched %d torrents, want all 2", len(list))
+	}
+}
+
+// The recently-active selector is not implemented and means every torrent, in
+// both the original spec's spelling and the current snake_case one. See
+// section 3.1 of
+// https://github.com/transmission/transmission/blob/main/docs/rpc-spec.md
+func TestRecentlyActiveMeansAllTorrents(t *testing.T) {
+	for _, ids := range []any{"recently-active", "recently_active", []any{"recently_active"}} {
+		t.Run(fmt.Sprint(ids), func(t *testing.T) {
+			eng := newFakeEngine()
+			eng.torrents = []engine.Status{{ID: 1}, {ID: 2}}
+			h := newHandler(t, eng, nil)
+
+			args, result := call(t, h, "torrent-get", map[string]any{"ids": ids, "fields": []string{"id"}})
+			if result != "success" {
+				t.Fatalf("result = %q", result)
+			}
+			if list, _ := args["torrents"].([]any); len(list) != 2 {
+				t.Errorf("matched %d torrents, want all 2", len(list))
+			}
+		})
 	}
 }
 
