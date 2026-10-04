@@ -11,6 +11,8 @@ import (
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/bencode"
 	"github.com/anacrolix/torrent/metainfo"
+
+	"github.com/moshen/bittrench/internal/store"
 )
 
 // buildTorrent writes a small multi-file torrent to disk and returns its
@@ -126,6 +128,159 @@ func TestExtensionAllowListRejectsATorrentWithNoMatches(t *testing.T) {
 	for _, f := range h.engine.Files(id) {
 		if f.Selected {
 			t.Errorf("%s was selected despite matching no allowed extension", f.Path)
+		}
+	}
+}
+
+// Starting a rejected torrent by hand - from Sonarr's queue or the web UI -
+// must still want nothing. With no recorded selection, a resume used to fall
+// back to every file.
+func TestStartingARejectedTorrentWantsNothing(t *testing.T) {
+	mi, _ := buildTorrent(t, map[string]string{"readme.nfo": "notes", "setup.exe": "binary"})
+
+	h := newHarness(t, func(c *cfgOpts) {
+		c.allowedExtensions = []string{"mkv"}
+		c.savePath = t.TempDir()
+	})
+	ctx := context.Background()
+	id, _, err := h.engine.Add(ctx, AddRequest{Metainfo: mi})
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	h.waitForMetadata(t, id)
+
+	if err := h.engine.Start(ctx, id); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	for _, f := range h.engine.Files(id) {
+		if f.Selected {
+			t.Errorf("%s was selected by starting a torrent the allow-list rejected", f.Path)
+		}
+	}
+	s, _ := h.engine.Status(id)
+	if s.Error == "" {
+		t.Error("starting the torrent cleared the allow-list's error")
+	}
+	// Wanting nothing is not having everything it wants: Sonarr would import
+	// an empty download.
+	if s.Complete() {
+		t.Errorf("a torrent that wants nothing reports complete: %+v", s)
+	}
+}
+
+// A magnet added before a restart, whose metadata arrives only after it, has
+// never been filtered. Restore used to exempt every restored torrent from the
+// allow-list, so this one downloaded everything.
+func TestRestoreFiltersATorrentThatWasNeverDecided(t *testing.T) {
+	mi, _ := buildTorrent(t, map[string]string{
+		"movie.mkv":  "video data here",
+		"readme.nfo": "notes",
+		"setup.exe":  "binary",
+	})
+	ctx := context.Background()
+
+	h := newHarness(t, func(c *cfgOpts) {
+		c.allowedExtensions = []string{"mkv"}
+		c.savePath = t.TempDir()
+	})
+	// Exactly what Add records for a magnet before its info dict arrives: no
+	// selection and not filtered. The metainfo stands in for the swarm
+	// delivering it after the restart.
+	m, err := metainfo.Load(bytes.NewReader(mi))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := h.store.Put(ctx, &store.Torrent{
+		InfoHash: m.HashInfoBytes(), Metainfo: mi, SavePath: h.cfg.Torrent.SavePath,
+	})
+	if err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	restored := h.restart(t)
+	if err := restored.Restore(ctx); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	waitForMetadata(t, restored, id)
+
+	for _, f := range restored.Files(id) {
+		want := filepath.Ext(f.Path) == ".mkv"
+		if f.Selected != want {
+			t.Errorf("%s selected = %v, want %v", f.Path, f.Selected, want)
+		}
+	}
+	saved, err := h.store.FileSelection(ctx, id)
+	if err != nil {
+		t.Fatalf("FileSelection: %v", err)
+	}
+	if len(saved) != 3 {
+		t.Errorf("the decision was not recorded: %v", saved)
+	}
+}
+
+// A restored torrent whose selection was decided keeps it, even when the
+// allow-list would now decide differently - a client may have chosen it.
+func TestRestoreKeepsARecordedSelection(t *testing.T) {
+	mi, _ := buildTorrent(t, map[string]string{"movie.mkv": "video", "readme.nfo": "notes"})
+	ctx := context.Background()
+
+	h := newHarness(t, func(c *cfgOpts) {
+		c.allowedExtensions = []string{"mkv"}
+		c.savePath = t.TempDir()
+	})
+	id, _, err := h.engine.Add(ctx, AddRequest{Metainfo: mi})
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	h.waitForMetadata(t, id)
+	files := h.engine.Files(id)
+	chosen := make([]bool, len(files))
+	for i, f := range files {
+		chosen[i] = filepath.Ext(f.Path) == ".nfo"
+	}
+	if err := h.engine.SetFileSelection(ctx, id, chosen); err != nil {
+		t.Fatalf("SetFileSelection: %v", err)
+	}
+
+	restored := h.restart(t)
+	if err := restored.Restore(ctx); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	waitForMetadata(t, restored, id)
+	for _, f := range restored.Files(id) {
+		want := filepath.Ext(f.Path) == ".nfo"
+		if f.Selected != want {
+			t.Errorf("%s selected = %v, want the client's choice %v", f.Path, f.Selected, want)
+		}
+	}
+}
+
+// Changing the files of a paused torrent records the choice but must not
+// start it: paused is "nothing is wanted".
+func TestSelectingFilesOfAPausedTorrentDoesNotStartIt(t *testing.T) {
+	mi, _ := buildTorrent(t, map[string]string{"movie.mkv": "video", "readme.nfo": "notes"})
+	ctx := context.Background()
+
+	h := newHarness(t, func(c *cfgOpts) { c.savePath = t.TempDir() })
+	id, _, err := h.engine.Add(ctx, AddRequest{Metainfo: mi, Paused: true})
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	h.waitForMetadata(t, id)
+	if err := h.engine.SetFileSelection(ctx, id, []bool{true, true}); err != nil {
+		t.Fatalf("SetFileSelection: %v", err)
+	}
+	for _, f := range h.engine.Files(id) {
+		if f.Selected {
+			t.Errorf("%s is wanted although the torrent is paused", f.Path)
+		}
+	}
+	if err := h.engine.Start(ctx, id); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	for _, f := range h.engine.Files(id) {
+		if !f.Selected {
+			t.Errorf("%s is not wanted after starting", f.Path)
 		}
 	}
 }

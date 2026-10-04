@@ -104,9 +104,8 @@ type Torrent struct {
 	// Error is the per-torrent error surfaced as Transmission
 	// error/errorString, e.g. an allow-list that matched no files.
 	Error string
-	// Filtered records that the extension allow-list has already been applied,
-	// so a restored torrent keeps its persisted selection and is exempt from
-	// being filtered again.
+	// Filtered records that the extension allow-list made the recorded file
+	// selection, as opposed to every file being selected.
 	Filtered bool
 	// Labels are the Transmission labels, which Sonarr and Radarr use to carry
 	// their category. Sorted, so a client polling twice sees the same order.
@@ -145,7 +144,14 @@ func Open(path string) (*Store, error) {
 	// WAL for concurrent readers alongside the completion flusher; foreign
 	// keys so deleting a torrent takes its file selection with it - SQLite
 	// leaves them off by default, which would silently orphan rows.
-	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)"
+	//
+	// Immediate transactions because every transaction here writes, and some
+	// read first to decide what to write. A deferred BEGIN takes the write
+	// lock only at the first write, so two of them can both read "undecided"
+	// and the loser fails with SQLITE_BUSY rather than waiting - busy_timeout
+	// cannot help a transaction that already holds a stale snapshot. BEGIN
+	// IMMEDIATE takes the lock up front and the second simply queues.
+	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_txlock=immediate"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open the state database %s: %w", path, err)
@@ -365,11 +371,6 @@ func (s *Store) SetError(ctx context.Context, id int64, msg string) error {
 	return s.update(ctx, `UPDATE torrents SET error = ? WHERE id = ?`, msg, id)
 }
 
-// SetFiltered marks the extension allow-list as applied.
-func (s *Store) SetFiltered(ctx context.Context, id int64, filtered bool) error {
-	return s.update(ctx, `UPDATE torrents SET filtered = ? WHERE id = ?`, boolToInt(filtered), id)
-}
-
 // SetFinishedAt records when a torrent first completed. A zero time clears it,
 // which happens when a torrent stops being complete.
 func (s *Store) SetFinishedAt(ctx context.Context, id int64, at time.Time) error {
@@ -404,24 +405,98 @@ func (s *Store) SetFileSelection(ctx context.Context, id int64, selected []bool)
 	if _, err := tx.ExecContext(ctx, `DELETE FROM file_selection WHERE torrent_id = ?`, id); err != nil {
 		return fmt.Errorf("failed to clear the previous file selection: %w", err)
 	}
-	stmt, err := tx.PrepareContext(ctx,
-		`INSERT INTO file_selection (torrent_id, file_index, selected) VALUES (?, ?, ?)`)
-	if err != nil {
-		return fmt.Errorf("failed to record the file selection: %w", err)
-	}
-	defer stmt.Close()
-	for i, sel := range selected {
-		if _, err := stmt.ExecContext(ctx, id, i, boolToInt(sel)); err != nil {
-			return fmt.Errorf("failed to record the selection of file %d: %w", i, err)
-		}
+	if err := writeFileSelection(ctx, tx, id, selected); err != nil {
+		return err
 	}
 	return tx.Commit()
 }
 
 // FileSelection returns the recorded selection, or nil when none is recorded -
-// which means "everything", not "nothing".
+// which means the selection has not been decided yet.
 func (s *Store) FileSelection(ctx context.Context, id int64) ([]bool, error) {
-	rows, err := s.db.QueryContext(ctx,
+	return readFileSelection(ctx, s.db, id)
+}
+
+// Decision is what a torrent should download, as decided once its metadata
+// is known: the per-file selection, whether the extension allow-list made it,
+// and the error to surface when the allow-list matched nothing.
+type Decision struct {
+	Selection []bool
+	Filtered  bool
+	Error     string
+}
+
+// DecideFileSelection records proposal as the torrent's selection unless one
+// is already recorded, and returns whichever is recorded afterwards. decided
+// reports that this call's proposal is the one that was recorded.
+//
+// This is what makes the database, not whichever goroutine got there first,
+// the answer to "what does this torrent want". The metadata watcher, a resume
+// and the download queue can all ask at once; each proposes, one proposal is
+// recorded, and every caller applies that one. Read and write share an
+// immediate transaction, so no caller can read "undecided" while another is
+// recording.
+func (s *Store) DecideFileSelection(ctx context.Context, id int64, proposal Decision) (_ Decision, decided bool, err error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Decision{}, false, fmt.Errorf("failed to decide the file selection: %w", err)
+	}
+	defer tx.Rollback()
+
+	selection, err := readFileSelection(ctx, tx, id)
+	if err != nil {
+		return Decision{}, false, err
+	}
+	if len(selection) > 0 {
+		recorded := Decision{Selection: selection}
+		var filtered int
+		if err := tx.QueryRowContext(ctx, `SELECT filtered, error FROM torrents WHERE id = ?`, id).
+			Scan(&filtered, &recorded.Error); err != nil {
+			return Decision{}, false, fmt.Errorf("failed to read the recorded file selection: %w", err)
+		}
+		recorded.Filtered = filtered != 0
+		return recorded, false, tx.Commit()
+	}
+
+	if err := writeFileSelection(ctx, tx, id, proposal.Selection); err != nil {
+		return Decision{}, false, err
+	}
+	res, err := tx.ExecContext(ctx, `UPDATE torrents SET filtered = ?, error = ? WHERE id = ?`,
+		boolToInt(proposal.Filtered), proposal.Error, id)
+	if err != nil {
+		return Decision{}, false, fmt.Errorf("failed to record the file selection: %w", err)
+	}
+	// The selection rows would be refused by the foreign key anyway, but say
+	// which torrent was missing rather than reporting a constraint.
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return Decision{}, false, fmt.Errorf("failed to record the file selection: no torrent with id %d", id)
+	}
+	if err := tx.Commit(); err != nil {
+		return Decision{}, false, fmt.Errorf("failed to record the file selection: %w", err)
+	}
+	return proposal, true, nil
+}
+
+// querier is what the file-selection helpers need, so they run the same
+// inside a transaction and outside one.
+type querier interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
+func writeFileSelection(ctx context.Context, q querier, id int64, selected []bool) error {
+	for i, sel := range selected {
+		if _, err := q.ExecContext(ctx,
+			`INSERT INTO file_selection (torrent_id, file_index, selected) VALUES (?, ?, ?)`,
+			id, i, boolToInt(sel)); err != nil {
+			return fmt.Errorf("failed to record the selection of file %d: %w", i, err)
+		}
+	}
+	return nil
+}
+
+func readFileSelection(ctx context.Context, q querier, id int64) ([]bool, error) {
+	rows, err := q.QueryContext(ctx,
 		`SELECT file_index, selected FROM file_selection WHERE torrent_id = ? ORDER BY file_index`, id)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read the file selection: %w", err)

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/anacrolix/torrent"
@@ -39,8 +40,8 @@ type record struct {
 	AddedAt    time.Time
 	FinishedAt time.Time
 	Error      string
-	// Filtered records that the allow-list has been applied, so a restored
-	// torrent keeps its selection instead of being filtered again.
+	// Filtered records that the allow-list made the recorded selection. A
+	// mirror of the database, which is where the decision is made.
 	Filtered bool
 	// Labels are the Transmission labels. Sonarr and Radarr carry their
 	// category in them, and both filter their queue by it, so they are
@@ -55,7 +56,8 @@ type record struct {
 	// Selection is what the torrent should be downloading, one bool per file.
 	// The *desired* selection, not the live one: a paused or queued torrent
 	// wants nothing at this moment, and its progress still has to be measured
-	// against the files it will want again. nil before metadata arrives.
+	// against the files it will want again. nil until the selection is
+	// decided, which needs metadata - see decideSelection.
 	Selection []bool
 	// Queued is set while the queue is holding this torrent back. It is
 	// deliberately not Paused: both are expressed as "nothing is wanted", but
@@ -66,6 +68,11 @@ type record struct {
 	// storedFinishedAt is what the database currently holds, so the monitor
 	// writes only when the value actually changes rather than every tick.
 	storedFinishedAt time.Time
+
+	// stateMu serialises making the torrent's live piece priorities match
+	// what it should be doing - see converge - and keeps the persisted paused
+	// flag and Paused changing together. Never held while taking queueMu.
+	stateMu sync.Mutex
 
 	// ready closes once the post-metadata work has run: the name recorded,
 	// the completion bitfields sized, and the file selection applied. It
@@ -111,9 +118,8 @@ func (e *Engine) Add(ctx context.Context, req AddRequest) (id int64, duplicate b
 	// the whole torrent is being fetched - there is nothing to suppress.
 	//
 	// Only upload is disallowed up front, since that flag is independent of
-	// the piece bookkeeping. See applyPaused for why the download flag is not
+	// the piece bookkeeping. See applyHeld for why the download flag is not
 	// used at all.
-	filtering := len(e.allowedExtensions) > 0
 	if req.Paused {
 		spec.DisallowDataUpload = true
 	}
@@ -169,12 +175,12 @@ func (e *Engine) Add(ctx context.Context, req AddRequest) (id int64, duplicate b
 		// an unplaced torrent sorts last by gid - the same place it is now.
 		slog.Warn("failed to record the queue position", "id", id, "error", err)
 	}
-	if req.Paused {
-		e.applyPaused(rec)
-	}
-	e.watch(rec, filtering)
 	// The new torrent may have to wait, or may be able to start immediately.
+	// Placed in the queue before anything is applied, so a torrent that has to
+	// wait is never briefly started first.
 	e.reconcileQueue()
+	e.converge(rec)
+	e.watch(rec)
 	slog.Info("torrent added", "id", id, "name", t.Name(),
 		"infohash", t.InfoHash().HexString(), "dir", dir, "paused", req.Paused)
 	return id, false, nil
@@ -264,8 +270,8 @@ func (e *Engine) resolveDownloadDir(dir string) (string, error) {
 
 // watch waits for metadata and then does the per-torrent work that needs it:
 // recording the name and metainfo, sizing the completion bitfields, and
-// applying either the allow-list or a restored file selection.
-func (e *Engine) watch(rec *record, filtering bool) {
+// deciding and applying the file selection.
+func (e *Engine) watch(rec *record) {
 	e.wg.Add(1)
 	go func() {
 		defer e.wg.Done()
@@ -277,11 +283,11 @@ func (e *Engine) watch(rec *record, filtering bool) {
 		case <-e.ctx.Done():
 			return
 		}
-		e.onMetadata(rec, filtering)
+		e.onMetadata(rec)
 	}()
 }
 
-func (e *Engine) onMetadata(rec *record, filtering bool) {
+func (e *Engine) onMetadata(rec *record) {
 	t := rec.Torrent
 	ctx := e.ctx
 
@@ -300,108 +306,93 @@ func (e *Engine) onMetadata(rec *record, filtering bool) {
 	}
 	e.completion.Register(t.InfoHash(), t.NumPieces())
 
-	if filtering {
-		e.applyAllowList(rec)
+	// Decided even for a paused or queued torrent, which applies none of it
+	// yet: its progress is measured against the selection, and a rejection
+	// has to surface now rather than when the torrent is let go.
+	if _, err := e.decideSelection(rec); err != nil {
 		return
 	}
-
-	e.mu.RLock()
-	held := rec.Paused || rec.Queued
-	e.mu.RUnlock()
-	if held {
-		// Paused, or waiting in the queue: either way nothing is wanted.
-		// Leaving every piece at the priority anacrolix starts them on is
-		// exactly that, so there is nothing to do until it is let go.
-		return
-	}
-
-	// A restored torrent keeps whatever selection was persisted.
-	selection, err := e.store.FileSelection(ctx, rec.ID)
-	if err != nil {
-		slog.Warn("failed to read the persisted file selection", "id", rec.ID, "error", err)
-	}
-	if len(selection) > 0 {
-		if err := e.selectFiles(rec, selection); err != nil {
-			slog.Warn("failed to restore the file selection", "id", rec.ID, "error", err)
-		}
-		return
-	}
-
-	// Otherwise select every file. This is not optional: anacrolix/torrent
-	// starts a torrent with every piece at priority None, so a torrent with no
-	// selection applied sits at 0% forever while looking perfectly healthy.
-	//
-	// Per-file priorities rather than Torrent.DownloadAll(), which raises
-	// piece priorities without touching File.prio - so DownloadAll leaves
-	// every File.Priority() reporting None, and anything deriving "is this
-	// file wanted" from it (the RPC layer, the UI) would say no about a
-	// torrent that is downloading fine.
-	all := make([]bool, len(t.Files()))
-	for i := range all {
-		all[i] = true
-	}
-	if err := e.selectFiles(rec, all); err != nil {
-		slog.Warn("failed to select the torrent's files", "id", rec.ID, "error", err)
-	}
+	e.converge(rec)
 }
 
-// applyAllowList downloads only the files whose extension is allowed.
+// decideSelection returns what the torrent should download once running,
+// deciding it on first use and recording the answer on the record.
 //
-// The rule that matters: if applying the selection fails, the torrent is NOT
-// resumed. Resuming would download everything, which is exactly the
-// user-visible "allow-list ignored" bug this filter exists to prevent.
-func (e *Engine) applyAllowList(rec *record) {
+// The database decides, not this goroutine: the metadata watcher, a resume
+// and the download queue can all get here at once, and each proposes what it
+// would select. DecideFileSelection records the first proposal and hands every
+// caller the recorded one, so they all apply the same selection whatever order
+// they ran in. Once recorded, the decision is final - a restart, a resume or a
+// later change to the allow-list reads it rather than deciding again; only a
+// client's own SetFileSelection replaces it.
+//
+// The rule that matters: on an error the caller must NOT apply anything.
+// Nothing is wanted until a selection is applied, so failing leaves the
+// torrent fetching nothing, while guessing "everything" is exactly the
+// user-visible "allow-list ignored" bug the filter exists to prevent.
+//
+// Callers must have checked that metadata has arrived.
+func (e *Engine) decideSelection(rec *record) ([]bool, error) {
 	t := rec.Torrent
 	files := t.Files()
 
-	selection := make([]bool, len(files))
+	// Without an allow-list every file is wanted. This is not optional:
+	// anacrolix/torrent starts a torrent with every piece at priority None,
+	// so a torrent with no selection applied sits at 0% forever while looking
+	// perfectly healthy.
+	proposal := store.Decision{Selection: make([]bool, len(files))}
 	matched := 0
 	for i, f := range files {
-		if e.extensionAllowed(f.DisplayPath()) {
-			selection[i] = true
+		if !e.filtering() || e.extensionAllowed(f.DisplayPath()) {
+			proposal.Selection[i] = true
 			matched++
 		}
 	}
-
-	if matched == 0 {
-		msg := fmt.Sprintf("no files match the allowed_extensions allow-list (%s)",
-			strings.Join(e.cfg.Torrent.AllowedExtensions, ", "))
-		e.setError(rec, msg)
-		slog.Warn("torrent rejected by the extension allow-list", "id", rec.ID, "name", t.Name())
-		return
-	}
-
-	// Record the decision before acting on it: if the write fails we must not
-	// start downloading, because a restart would then have no record of what
-	// was wanted and would fetch everything.
-	if err := e.store.SetFileSelection(e.ctx, rec.ID, selection); err != nil {
-		e.setError(rec, fmt.Sprintf("failed to record the file selection: %v", err))
-		slog.Error("not resuming: the file selection could not be recorded",
-			"id", rec.ID, "name", t.Name(), "error", err)
-		return
-	}
-	// Recorded either way: a paused torrent still has a selection, it just is
-	// not downloading it yet.
-	e.setDesiredSelection(rec, selection)
-	if !rec.Paused {
-		if err := applySelection(t, selection); err != nil {
-			e.setError(rec, fmt.Sprintf("failed to apply the extension allow-list: %v", err))
-			slog.Error("not resuming: applying the allow-list failed, and resuming would download everything",
-				"id", rec.ID, "name", t.Name(), "error", err)
-			return
+	if e.filtering() {
+		proposal.Filtered = true
+		// Recorded as selecting nothing rather than left undecided, so that
+		// starting the torrent by hand still wants nothing.
+		if matched == 0 {
+			proposal.Error = fmt.Sprintf("no files match the allowed_extensions allow-list (%s)",
+				strings.Join(e.cfg.Torrent.AllowedExtensions, ", "))
 		}
 	}
 
-	e.mu.Lock()
-	rec.Filtered = true
-	e.mu.Unlock()
-	if err := e.store.SetFiltered(e.ctx, rec.ID, true); err != nil {
-		slog.Warn("failed to record the filtered flag", "id", rec.ID, "error", err)
+	decision, decided, err := e.store.DecideFileSelection(e.ctx, rec.ID, proposal)
+	if err != nil {
+		e.setError(rec, fmt.Sprintf("failed to record the file selection: %v", err))
+		slog.Error("not starting: the file selection could not be recorded",
+			"id", rec.ID, "name", t.Name(), "error", err)
+		return nil, err
+	}
+	if len(decision.Selection) != len(files) {
+		err := fmt.Errorf("the recorded selection covers %d files but the torrent has %d",
+			len(decision.Selection), len(files))
+		e.setError(rec, err.Error())
+		slog.Error("not starting: the recorded file selection does not fit the torrent",
+			"id", rec.ID, "name", t.Name(), "error", err)
+		return nil, err
 	}
 
-	slog.Info("extension allow-list applied", "id", rec.ID, "name", t.Name(),
-		"selected", matched, "of", len(files))
+	e.mu.Lock()
+	rec.Selection = slices.Clone(decision.Selection)
+	rec.Filtered = decision.Filtered
+	rec.Error = decision.Error
+	e.mu.Unlock()
+
+	if decided && decision.Filtered {
+		if decision.Error != "" {
+			slog.Warn("torrent rejected by the extension allow-list", "id", rec.ID, "name", t.Name())
+		} else {
+			slog.Info("extension allow-list applied", "id", rec.ID, "name", t.Name(),
+				"selected", matched, "of", len(files))
+		}
+	}
+	return decision.Selection, nil
 }
+
+// filtering reports whether an extension allow-list is configured.
+func (e *Engine) filtering() bool { return len(e.allowedExtensions) > 0 }
 
 // extensionAllowed reports whether a path's extension is in the allow-list.
 func (e *Engine) extensionAllowed(path string) bool {
@@ -414,24 +405,6 @@ func (e *Engine) extensionAllowed(path string) bool {
 }
 
 // applySelection maps a per-file boolean selection onto piece priorities.
-// selectFiles records a selection as the torrent's desired one and applies it.
-//
-// Everything that changes what a torrent wants goes through here, so that the
-// record's Selection - which is what Status measures progress and completion
-// against - cannot drift from the priorities actually set on the files.
-func (e *Engine) selectFiles(rec *record, selection []bool) error {
-	e.setDesiredSelection(rec, selection)
-	return applySelection(rec.Torrent, selection)
-}
-
-// setDesiredSelection records the selection without applying it, for the one
-// caller that must not apply it: a paused torrent wants nothing right now.
-func (e *Engine) setDesiredSelection(rec *record, selection []bool) {
-	e.mu.Lock()
-	rec.Selection = slices.Clone(selection)
-	e.mu.Unlock()
-}
-
 func applySelection(t *torrent.Torrent, selection []bool) error {
 	files := t.Files()
 	if len(selection) != len(files) {
@@ -504,48 +477,105 @@ func (e *Engine) SetFileSelection(ctx context.Context, id int64, selection []boo
 	if rec.Torrent.Info() == nil {
 		return errors.New("the torrent's metadata has not arrived yet")
 	}
-	if err := e.selectFiles(rec, selection); err != nil {
+	if n := len(rec.Torrent.Files()); len(selection) != n {
+		return fmt.Errorf("selection covers %d files but the torrent has %d", len(selection), n)
+	}
+	rec.stateMu.Lock()
+	defer rec.stateMu.Unlock()
+	// Recorded before it is applied: the database is what a resume, the
+	// queue and a restart read, so it has to hold the client's choice before
+	// anything can act on it.
+	if err := e.store.SetFileSelection(ctx, id, selection); err != nil {
 		return err
 	}
-	return e.store.SetFileSelection(ctx, id, selection)
+	e.mu.Lock()
+	rec.Selection = slices.Clone(selection)
+	e.mu.Unlock()
+	e.convergeLocked(rec)
+	return nil
 }
 
 // Stop pauses a torrent. anacrolix/torrent has no pause, so this is emulated
 // and the flag we set is the authoritative record of it.
 func (e *Engine) Stop(ctx context.Context, id int64) error {
-	rec := e.record(id)
-	if rec == nil {
-		return fmt.Errorf("no torrent with id %d", id)
+	if err := e.setPaused(ctx, id, true); err != nil {
+		return err
 	}
-	e.mu.Lock()
-	rec.Paused = true
-	e.mu.Unlock()
-	e.applyPaused(rec)
 	slog.Info("torrent stopped", "id", id)
-	// Stopping frees a download slot for whatever is waiting behind it.
-	defer e.reconcileQueue()
-	return e.store.SetPaused(ctx, id, true)
+	return nil
 }
 
 // Start resumes a torrent.
 func (e *Engine) Start(ctx context.Context, id int64) error {
+	if err := e.setPaused(ctx, id, false); err != nil {
+		return err
+	}
+	slog.Info("torrent started", "id", id)
+	return nil
+}
+
+// setPaused records the paused flag and then makes the torrent act on it.
+//
+// The database first: if the write fails nothing has changed, rather than the
+// torrent being paused now and running again after a restart. The write and
+// the flag change share stateMu, so a stop and a start racing each other land
+// in the database and in memory in the same order.
+//
+// The queue is reconciled before converging. Stopping frees a slot for
+// whatever is waiting, and starting may have to wait its turn - converging
+// first would start a torrent the queue is about to hold.
+func (e *Engine) setPaused(ctx context.Context, id int64, paused bool) error {
 	rec := e.record(id)
 	if rec == nil {
 		return fmt.Errorf("no torrent with id %d", id)
 	}
-	e.mu.Lock()
-	rec.Paused = false
-	e.mu.Unlock()
-	e.resume(rec)
-	slog.Info("torrent started", "id", id)
-	// Starting may mean this torrent has to wait its turn, or that it takes a
-	// slot from nothing - reconcile decides which, and undoes the resume above
-	// if the queue is full.
-	defer e.reconcileQueue()
-	return e.store.SetPaused(ctx, id, false)
+	rec.stateMu.Lock()
+	err := e.store.SetPaused(ctx, id, paused)
+	if err == nil {
+		e.mu.Lock()
+		rec.Paused = paused
+		e.mu.Unlock()
+	}
+	rec.stateMu.Unlock()
+	if err != nil {
+		return err
+	}
+	e.reconcileQueue()
+	e.converge(rec)
+	return nil
 }
 
-// applyPaused stops a torrent by making nothing wanted.
+// converge makes the torrent's live state match what it should be doing:
+// nothing while paused or queued, its decided selection otherwise.
+//
+// This is the only thing that sets piece priorities. Everything that changes
+// what a torrent should be doing - a stop or start, the queue, metadata
+// arriving, a client choosing files - changes the state first and converges
+// after. converge reads that state when it runs, under stateMu, so the last
+// converge always applies the latest state. Applying a decision made earlier
+// is what lost a stop: a watcher that saw "running" could apply the selection
+// after the stop had already applied nothing, leaving a paused torrent
+// downloading.
+func (e *Engine) converge(rec *record) {
+	rec.stateMu.Lock()
+	defer rec.stateMu.Unlock()
+	e.convergeLocked(rec)
+}
+
+// convergeLocked is converge for a caller already holding stateMu.
+func (e *Engine) convergeLocked(rec *record) {
+	e.mu.RLock()
+	held := rec.Paused || rec.Queued
+	e.mu.RUnlock()
+	if held {
+		e.applyHeld(rec)
+		return
+	}
+	e.applyRunning(rec)
+}
+
+// applyHeld makes nothing wanted, which is how both paused and queued are
+// expressed.
 //
 // Deliberately NOT Torrent.DisallowDataDownload(), which is the obvious call
 // and which crashes the daemon. Setting that flag makes Piece.ignoreForRequests
@@ -560,7 +590,7 @@ func (e *Engine) Start(ctx context.Context, id int64) error {
 // structures together, so "no piece is wanted" is the representation of paused
 // that the library actually supports. The selection is persisted, so resuming
 // restores exactly what was wanted before.
-func (e *Engine) applyPaused(rec *record) {
+func (e *Engine) applyHeld(rec *record) {
 	if rec.Torrent.Info() != nil {
 		for _, f := range rec.Torrent.Files() {
 			f.SetPriority(torrent.PiecePriorityNone)
@@ -572,35 +602,28 @@ func (e *Engine) applyPaused(rec *record) {
 	rec.Torrent.SetMaxEstablishedConns(0)
 }
 
-// resume reapplies the wanted selection. Before metadata there is nothing to
-// apply and the watcher does it when the info dict arrives.
-func (e *Engine) resume(rec *record) {
+// applyRunning applies the wanted selection. Before metadata there is nothing
+// to apply and the watcher converges again when the info dict arrives.
+//
+// The selection comes from decideSelection rather than straight from the
+// database: this can run after the info dict arrives but before the watcher
+// has recorded anything, and an unrecorded selection is undecided, not
+// "everything".
+func (e *Engine) applyRunning(rec *record) {
 	rec.Torrent.AllowDataUpload()
 	rec.Torrent.SetMaxEstablishedConns(e.maxPeers)
 	if rec.Torrent.Info() == nil {
 		return
 	}
-	if err := e.selectFiles(rec, e.desiredSelection(rec)); err != nil {
-		slog.Warn("failed to apply the file selection on resume", "id", rec.ID, "error", err)
-	}
-}
-
-// desiredSelection is what the torrent should be downloading when running: the
-// persisted selection, or everything when none was ever recorded.
-func (e *Engine) desiredSelection(rec *record) []bool {
-	files := rec.Torrent.Files()
-	selection, err := e.store.FileSelection(e.ctx, rec.ID)
+	selection, err := e.decideSelection(rec)
 	if err != nil {
-		slog.Warn("failed to read the persisted file selection", "id", rec.ID, "error", err)
+		return
 	}
-	if len(selection) == len(files) {
-		return selection
+	if err := applySelection(rec.Torrent, selection); err != nil {
+		e.setError(rec, fmt.Sprintf("failed to apply the file selection: %v", err))
+		slog.Error("not starting: the file selection could not be applied",
+			"id", rec.ID, "name", rec.Torrent.Name(), "error", err)
 	}
-	all := make([]bool, len(files))
-	for i := range all {
-		all[i] = true
-	}
-	return all
 }
 
 func (e *Engine) setError(rec *record, msg string) {
@@ -699,32 +722,44 @@ func underRoot(root, path string) bool {
 }
 
 // Restore re-adds every persisted torrent, reapplying its paused flag and file
-// selection. Torrents restored this way are exempt from the extension filter:
-// their selection was already decided, and re-running the filter would
-// overwrite a client's later choice.
+// selection. A torrent whose selection was recorded keeps it - re-running the
+// filter would overwrite a client's later choice. One that was never decided,
+// such as a magnet whose metadata had not arrived before the restart, is
+// decided when its metadata arrives, exactly as a fresh add would be.
 func (e *Engine) Restore(ctx context.Context) error {
 	saved, err := e.store.List(ctx)
 	if err != nil {
 		return err
 	}
 	var errs []error
+	var restored []*record
 	for _, s := range saved {
-		if err := e.restoreOne(ctx, s); err != nil {
+		rec, err := e.restoreOne(ctx, s)
+		if err != nil {
 			errs = append(errs, fmt.Errorf("torrent %d (%s): %w", s.ID, s.Name, err))
+			continue
 		}
+		restored = append(restored, rec)
 	}
 	slog.Info("restored torrents", "count", len(saved)-len(errs), "failed", len(errs))
-	// Once, after the whole list is back: restoring ten torrents into a
-	// five-deep queue must leave five of them waiting, not all ten running.
+	// Once, after the whole list is back, and before anything is applied:
+	// restoring ten torrents into a five-deep queue must leave five of them
+	// waiting, not start all ten and then hold five.
 	e.reconcileQueue()
+	for _, rec := range restored {
+		e.converge(rec)
+		e.watch(rec)
+	}
 	return errors.Join(errs...)
 }
 
-func (e *Engine) restoreOne(ctx context.Context, s store.Torrent) error {
+// restoreOne re-adds one persisted torrent and records it. It applies nothing:
+// Restore does that once the queue has placed every torrent.
+func (e *Engine) restoreOne(ctx context.Context, s store.Torrent) (*record, error) {
 	req := AddRequest{Source: s.Source, Metainfo: s.Metainfo, DownloadDir: s.SavePath, Paused: s.Paused}
 	spec, err := e.spec(ctx, req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	spec.Storage = storage.NewFileWithCompletion(s.SavePath, e.completion)
 	if s.Paused {
@@ -732,7 +767,7 @@ func (e *Engine) restoreOne(ctx context.Context, s store.Torrent) error {
 	}
 	t, _, err := e.client.AddTorrentSpec(spec)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	rec := &record{
@@ -747,15 +782,7 @@ func (e *Engine) restoreOne(ctx context.Context, s store.Torrent) error {
 	e.mu.Lock()
 	e.records[s.ID] = rec
 	e.mu.Unlock()
-
-	if s.Paused {
-		e.applyPaused(rec)
-	} else {
-		rec.Torrent.SetMaxEstablishedConns(e.maxPeers)
-	}
-	// filtering=false: a restored torrent's selection was already decided.
-	e.watch(rec, false)
-	return nil
+	return rec, nil
 }
 
 // record returns the record for a gid, or nil.

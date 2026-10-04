@@ -95,8 +95,12 @@ func (s Status) Ratio() float64 {
 // This is the daemon's one definition of a finished download: the state
 // machine, the seed monitor, the download queue and the Transmission RPC layer
 // all ask it, rather than each deciding for itself.
+//
+// A torrent that wants nothing is not complete. The allow-list records a
+// rejected torrent as selecting no files, and calling that finished would
+// hand Sonarr an empty download to import.
 func (s Status) Complete() bool {
-	return s.HasMetadata && s.LeftUntilDone == 0
+	return s.HasMetadata && s.SizeWhenDone > 0 && s.LeftUntilDone == 0
 }
 
 // ETA is how long the wanted bytes will take at the current rate, or -1 when

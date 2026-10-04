@@ -719,12 +719,10 @@ func (h *Handler) torrentFields(s engine.Status, files []engine.File) map[string
 	sizeWhenDone, leftUntilDone := s.SizeWhenDone, s.LeftUntilDone
 	complete := s.Complete()
 
+	// Zero when nothing is wanted: Complete says that is not finished either.
 	var percentDone float64
-	switch {
-	case sizeWhenDone > 0:
+	if sizeWhenDone > 0 {
 		percentDone = float64(sizeWhenDone-leftUntilDone) / float64(sizeWhenDone)
-	case complete:
-		percentDone = 1
 	}
 
 	var percentComplete float64

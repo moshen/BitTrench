@@ -20,7 +20,7 @@ import (
 //
 // A held torrent is expressed exactly as a paused one: nothing is wanted. That
 // is not a shortcut, it is the only representation the library supports - see
-// applyPaused for why the obvious DisallowDataDownload crashes the process. The
+// applyHeld for why the obvious DisallowDataDownload crashes the process. The
 // difference between held and paused is who did it, which is why Queued is
 // tracked separately from Paused rather than reusing it.
 
@@ -182,16 +182,18 @@ func (e *Engine) reconcileQueue() {
 	}
 	e.mu.Unlock()
 
-	// Outside the lock: both touch the torrent client, which takes its own.
+	// Outside the lock: converging touches the torrent client, which takes its
+	// own. It reads the flags afresh rather than acting on this pass's
+	// decision, so a torrent stopped since then stays stopped.
 	for _, rec := range hold {
 		slog.Info("torrent queued", "id", rec.ID, "name", rec.Torrent.Name(),
 			"position", rec.QueuePosition)
-		e.applyPaused(rec)
+		e.converge(rec)
 	}
 	for _, rec := range release {
 		slog.Info("torrent leaving the queue", "id", rec.ID, "name", rec.Torrent.Name(),
 			"position", rec.QueuePosition)
-		e.resume(rec)
+		e.converge(rec)
 	}
 }
 
