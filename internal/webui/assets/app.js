@@ -161,8 +161,9 @@ function torrentProgressPct(t) {
 	// Against the files the torrent wants, not its whole size: under an
 	// extension allow-list the rest never arrives, and progress measured against
 	// the whole torrent stops short of 100% for good. size_when_done equals
-	// total_bytes when nothing is deselected.
-	const size = t.size_when_done || t.total_bytes;
+	// total_bytes when nothing is deselected, and is zero when nothing is
+	// wanted - a torrent the allow-list rejected has made no progress.
+	const size = t.size_when_done;
 	if (!size) return 0;
 	const done = size - (t.left_until_done || 0);
 	return (100 * done) / size;

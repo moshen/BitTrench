@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"path/filepath"
+	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -98,14 +100,15 @@ func TestTorrentStateRoundTrips(t *testing.T) {
 	}
 
 	finished := time.Now().Truncate(time.Second)
+	_, _, decideErr := s.DecideFileSelection(ctx, id, Decision{Selection: []bool{false}, Filtered: true})
 	for _, step := range []struct {
 		name string
 		err  error
 	}{
 		{"SetName", s.SetName(ctx, id, "Some.Release")},
+		{"DecideFileSelection", decideErr},
 		{"SetError", s.SetError(ctx, id, "no files matched the allow-list")},
 		{"SetFinishedAt", s.SetFinishedAt(ctx, id, finished)},
-		{"SetFiltered", s.SetFiltered(ctx, id, true)},
 		{"SetPaused", s.SetPaused(ctx, id, false)},
 	} {
 		if step.err != nil {
@@ -197,6 +200,133 @@ func TestFileSelectionRoundTrips(t *testing.T) {
 	}
 	if got, _ := s.FileSelection(ctx, id); len(got) != 1 {
 		t.Errorf("selection = %v, want it replaced", got)
+	}
+}
+
+// The first decision is final: a later proposal - a resume racing the
+// metadata watcher, or a restart under a changed allow-list - gets the
+// recorded one back, and only a client's own SetFileSelection replaces it.
+func TestDecideFileSelectionRecordsOnlyTheFirstProposal(t *testing.T) {
+	ctx := context.Background()
+	s, _ := open(t)
+	id, err := s.Put(ctx, &Torrent{InfoHash: hash(10), SavePath: "/data"})
+	if err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	first := Decision{Selection: []bool{true, false}, Filtered: true}
+	got, decided, err := s.DecideFileSelection(ctx, id, first)
+	if err != nil {
+		t.Fatalf("DecideFileSelection: %v", err)
+	}
+	if !decided || !slices.Equal(got.Selection, first.Selection) || !got.Filtered {
+		t.Fatalf("first proposal = %+v, decided %v; want it recorded", got, decided)
+	}
+
+	got, decided, err = s.DecideFileSelection(ctx, id, Decision{Selection: []bool{true, true}})
+	if err != nil {
+		t.Fatalf("DecideFileSelection: %v", err)
+	}
+	if decided || !slices.Equal(got.Selection, first.Selection) || !got.Filtered {
+		t.Errorf("second proposal = %+v, decided %v; want the first one back", got, decided)
+	}
+
+	// A client's choice replaces the decision, and is what is decided after.
+	if err := s.SetFileSelection(ctx, id, []bool{false, true}); err != nil {
+		t.Fatalf("SetFileSelection: %v", err)
+	}
+	got, _, err = s.DecideFileSelection(ctx, id, first)
+	if err != nil {
+		t.Fatalf("DecideFileSelection: %v", err)
+	}
+	if !slices.Equal(got.Selection, []bool{false, true}) {
+		t.Errorf("after a client's choice the decision = %v, want [false true]", got.Selection)
+	}
+}
+
+// A rejection is recorded with its error in the same transaction, so a
+// restart cannot find the one without the other.
+func TestDecideFileSelectionRecordsTheRejection(t *testing.T) {
+	ctx := context.Background()
+	s, _ := open(t)
+	id, err := s.Put(ctx, &Torrent{InfoHash: hash(12), SavePath: "/data"})
+	if err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	rejection := Decision{Selection: []bool{false, false}, Filtered: true, Error: "no files match"}
+	if _, _, err := s.DecideFileSelection(ctx, id, rejection); err != nil {
+		t.Fatalf("DecideFileSelection: %v", err)
+	}
+
+	list, err := s.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if !list[0].Filtered || list[0].Error != "no files match" {
+		t.Errorf("recorded torrent = %+v, want it filtered and in error", list[0])
+	}
+	got, _, err := s.DecideFileSelection(ctx, id, Decision{Selection: []bool{true, true}})
+	if err != nil {
+		t.Fatalf("DecideFileSelection: %v", err)
+	}
+	if got.Error != "no files match" || slices.Contains(got.Selection, true) {
+		t.Errorf("a later proposal = %+v, want the rejection back", got)
+	}
+}
+
+// Many deciders at once - the watcher, a resume, the queue - all come away
+// with the same selection, and exactly one of them recorded it. Each proposes
+// something different, so any interleaving shows up as disagreement.
+func TestConcurrentDecidersAgree(t *testing.T) {
+	ctx := context.Background()
+	s, _ := open(t)
+	id, err := s.Put(ctx, &Torrent{InfoHash: hash(13), SavePath: "/data"})
+	if err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	const deciders = 16
+	results := make([]Decision, deciders)
+	won := make([]bool, deciders)
+	errs := make([]error, deciders)
+	var wg sync.WaitGroup
+	for i := range deciders {
+		wg.Go(func() {
+			proposal := make([]bool, deciders)
+			proposal[i] = true
+			results[i], won[i], errs[i] = s.DecideFileSelection(ctx, id, Decision{Selection: proposal})
+		})
+	}
+	wg.Wait()
+
+	winners := 0
+	for i := range deciders {
+		if errs[i] != nil {
+			t.Fatalf("decider %d: %v", i, errs[i])
+		}
+		if won[i] {
+			winners++
+		}
+		if !slices.Equal(results[i].Selection, results[0].Selection) {
+			t.Errorf("decider %d got %v, decider 0 got %v", i, results[i].Selection, results[0].Selection)
+		}
+	}
+	if winners != 1 {
+		t.Errorf("%d deciders recorded a selection, want exactly 1", winners)
+	}
+	recorded, err := s.FileSelection(ctx, id)
+	if err != nil {
+		t.Fatalf("FileSelection: %v", err)
+	}
+	if !slices.Equal(recorded, results[0].Selection) {
+		t.Errorf("recorded %v, deciders were told %v", recorded, results[0].Selection)
+	}
+}
+
+func TestDecideFileSelectionForAnUnknownTorrentFails(t *testing.T) {
+	s, _ := open(t)
+	if _, _, err := s.DecideFileSelection(context.Background(), 404, Decision{Selection: []bool{true}}); err == nil {
+		t.Error("deciding for a torrent that does not exist succeeded")
 	}
 }
 

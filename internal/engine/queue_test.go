@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -94,6 +95,48 @@ func TestStoppingATorrentReleasesItsSlot(t *testing.T) {
 	}
 	if got := states(t, h.engine, ids); got[1] == StateQueued {
 		t.Error("the waiting torrent was not released when the slot freed")
+	}
+}
+
+// A torrent the queue is holding when its metadata arrives wants nothing, and
+// once let go wants exactly what the allow-list chose - not nothing, and not
+// everything.
+func TestAQueuedTorrentIsFilteredButNotStarted(t *testing.T) {
+	h := newHarness(t, func(c *cfgOpts) {
+		c.downloadQueueSize = 1
+		c.allowedExtensions = []string{"mkv"}
+	})
+	ctx := context.Background()
+	first, _ := buildTorrent(t, map[string]string{"first.mkv": "occupies the only slot"})
+	second, _ := buildTorrent(t, map[string]string{"second.mkv": "video", "second.nfo": "notes"})
+
+	running, _, err := h.engine.Add(ctx, AddRequest{Metainfo: first})
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	waiting, _, err := h.engine.Add(ctx, AddRequest{Metainfo: second})
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	h.waitForMetadata(t, waiting)
+
+	if st, _ := h.engine.Status(waiting); st.State != StateQueued {
+		t.Fatalf("second torrent is %s, want queued", st.State)
+	}
+	for _, f := range h.engine.Files(waiting) {
+		if f.Selected {
+			t.Errorf("%s is wanted while the torrent waits in the queue", f.Path)
+		}
+	}
+
+	if err := h.engine.Stop(ctx, running); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	for _, f := range h.engine.Files(waiting) {
+		want := filepath.Ext(f.Path) == ".mkv"
+		if f.Selected != want {
+			t.Errorf("after leaving the queue %s selected = %v, want %v", f.Path, f.Selected, want)
+		}
 	}
 }
 
