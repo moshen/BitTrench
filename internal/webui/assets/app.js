@@ -708,10 +708,26 @@ function syncAllFiles(all, boxes) {
 	all.indeterminate = n > 0 && n < boxes.length;
 }
 
-async function onFileToggle(id, host) {
+// fileSaves chains each torrent's selection saves. Every POST replaces the
+// whole selection and the server handles requests concurrently, so two quick
+// clicks sent side by side could land in either order, leaving the server on
+// the older choice while the checkboxes show the newer one.
+const fileSaves = new Map();
+
+function onFileToggle(id, host) {
 	const checked = Array.from(
 		host.querySelectorAll("input[data-fi]:checked"),
 	).map((cb) => parseInt(cb.dataset.fi, 10));
+	const save = (fileSaves.get(id) || Promise.resolve()).then(() =>
+		saveFiles(id, checked),
+	);
+	fileSaves.set(id, save);
+	save.then(() => {
+		if (fileSaves.get(id) === save) fileSaves.delete(id);
+	});
+}
+
+async function saveFiles(id, checked) {
 	try {
 		await api(`/torrents/${encodeURIComponent(id)}/files`, {
 			method: "POST",
