@@ -644,7 +644,7 @@ async function loadFiles(id) {
 		}
 		const onlyFiles = new Set(files.flatMap((f, i) => (f.selected ? [i] : [])));
 		let html =
-			'<table class="files"><thead><tr><th>✓</th><th>Name</th><th class="num">Size</th></tr></thead><tbody>';
+			'<table class="files"><thead><tr><th><input type="checkbox" class="all-files" title="Select all or none"></th><th>Name</th><th class="num">Size</th></tr></thead><tbody>';
 		files.forEach((f, i) => {
 			const checked = onlyFiles.has(i) ? " checked" : "";
 			html +=
@@ -654,8 +654,18 @@ async function loadFiles(id) {
 		});
 		html += "</tbody></table>";
 		host.innerHTML = html;
-		host.querySelectorAll("input[type=checkbox]").forEach((cb) => {
-			cb.addEventListener("change", () => onFileToggle(id, host));
+		const all = host.querySelector("input.all-files");
+		const boxes = host.querySelectorAll("input[data-fi]");
+		syncAllFiles(all, boxes);
+		all.addEventListener("change", () => {
+			for (const cb of boxes) cb.checked = all.checked;
+			onFileToggle(id, host);
+		});
+		boxes.forEach((cb) => {
+			cb.addEventListener("change", () => {
+				syncAllFiles(all, boxes);
+				onFileToggle(id, host);
+			});
 		});
 	} catch (e) {
 		host.textContent = `Files unavailable: ${e.message}`;
@@ -690,9 +700,17 @@ function updateInfoSection(t) {
 		`<tr><th>Seed time</th><td>${seedSecs !== null ? fmtDuration(seedSecs) : "-"}</td></tr>`;
 }
 
+// syncAllFiles shows the header box checked when every file is selected,
+// clear when none is, and indeterminate in between.
+function syncAllFiles(all, boxes) {
+	const n = Array.from(boxes).filter((cb) => cb.checked).length;
+	all.checked = n === boxes.length;
+	all.indeterminate = n > 0 && n < boxes.length;
+}
+
 async function onFileToggle(id, host) {
 	const checked = Array.from(
-		host.querySelectorAll("input[type=checkbox]:checked"),
+		host.querySelectorAll("input[data-fi]:checked"),
 	).map((cb) => parseInt(cb.dataset.fi, 10));
 	try {
 		await api(`/torrents/${encodeURIComponent(id)}/files`, {
