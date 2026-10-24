@@ -657,15 +657,15 @@ async function loadFiles(id) {
 		const all = host.querySelector("input.all-files");
 		const boxes = host.querySelectorAll("input[data-fi]");
 		syncAllFiles(all, boxes);
-		all.addEventListener("change", () => {
-			for (const cb of boxes) cb.checked = all.checked;
-			onFileToggle(id, host);
-		});
-		boxes.forEach((cb) => {
-			cb.addEventListener("change", () => {
+		// On the table rather than host: a failed save re-renders, and the
+		// listener goes with the table it replaces instead of piling up.
+		host.querySelector("table.files").addEventListener("change", (e) => {
+			if (e.target === all) {
+				for (const cb of boxes) cb.checked = all.checked;
+			} else {
 				syncAllFiles(all, boxes);
-				onFileToggle(id, host);
-			});
+			}
+			onFileToggle(id, host);
 		});
 	} catch (e) {
 		host.textContent = `Files unavailable: ${e.message}`;
