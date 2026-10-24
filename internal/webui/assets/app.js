@@ -719,7 +719,7 @@ function onFileToggle(id, host) {
 		host.querySelectorAll("input[data-fi]:checked"),
 	).map((cb) => parseInt(cb.dataset.fi, 10));
 	const save = (fileSaves.get(id) || Promise.resolve()).then(() =>
-		saveFiles(id, checked),
+		saveFiles(id, checked, () => fileSaves.get(id) === save),
 	);
 	fileSaves.set(id, save);
 	save.then(() => {
@@ -727,7 +727,10 @@ function onFileToggle(id, host) {
 	});
 }
 
-async function saveFiles(id, checked) {
+// saveFiles reloads the list after a failure only when it is the latest save:
+// a newer one is already queued with what the checkboxes show, and a reload
+// racing it could redraw the list from the selection before it.
+async function saveFiles(id, checked, isLatest) {
 	try {
 		await api(`/torrents/${encodeURIComponent(id)}/files`, {
 			method: "POST",
@@ -736,7 +739,7 @@ async function saveFiles(id, checked) {
 		});
 	} catch (e) {
 		alert(`Failed to update file selection: ${e.message}`);
-		loadFiles(id);
+		if (isLatest()) loadFiles(id);
 	}
 }
 
