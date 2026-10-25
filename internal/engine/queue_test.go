@@ -123,19 +123,25 @@ func TestAQueuedTorrentIsFilteredButNotStarted(t *testing.T) {
 	if st, _ := h.engine.Status(waiting); st.State != StateQueued {
 		t.Fatalf("second torrent is %s, want queued", st.State)
 	}
+	for path, on := range wanted(t, h.engine, waiting) {
+		if on {
+			t.Errorf("%s is wanted while the torrent waits in the queue", path)
+		}
+	}
+	// Filtered all the same: the queue holds the choice, it does not erase it.
 	for _, f := range h.engine.Files(waiting) {
-		if f.Selected {
-			t.Errorf("%s is wanted while the torrent waits in the queue", f.Path)
+		want := filepath.Ext(f.Path) == ".mkv"
+		if f.Selected != want {
+			t.Errorf("while queued %s selected = %v, want %v", f.Path, f.Selected, want)
 		}
 	}
 
 	if err := h.engine.Stop(ctx, running); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
-	for _, f := range h.engine.Files(waiting) {
-		want := filepath.Ext(f.Path) == ".mkv"
-		if f.Selected != want {
-			t.Errorf("after leaving the queue %s selected = %v, want %v", f.Path, f.Selected, want)
+	for path, on := range wanted(t, h.engine, waiting) {
+		if want := filepath.Ext(path) == ".mkv"; on != want {
+			t.Errorf("after leaving the queue %s wanted = %v, want %v", path, on, want)
 		}
 	}
 }

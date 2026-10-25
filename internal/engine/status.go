@@ -151,7 +151,9 @@ type File struct {
 	Path      string
 	Length    int64
 	Completed int64
-	Selected  bool
+	// Selected is whether the file is in the torrent's recorded selection,
+	// which a paused or queued torrent keeps while it wants nothing.
+	Selected bool
 }
 
 // Files returns a torrent's files, or nil if the gid is unknown or metadata
@@ -163,6 +165,13 @@ func (e *Engine) Files(id int64) []File {
 	if rec == nil || rec.Torrent.Info() == nil {
 		return nil
 	}
+	// The recorded selection, not live piece priorities: a paused or queued
+	// torrent wants nothing right now, and reporting that as its selection
+	// shows the client every file deselected and hands a client that edits
+	// the list an empty base to overwrite the real choice with.
+	e.mu.RLock()
+	selection := slices.Clone(rec.Selection)
+	e.mu.RUnlock()
 	files := rec.Torrent.Files()
 	out := make([]File, len(files))
 	for i, f := range files {
@@ -171,7 +180,7 @@ func (e *Engine) Files(id int64) []File {
 			Path:      f.DisplayPath(),
 			Length:    f.Length(),
 			Completed: f.BytesCompleted(),
-			Selected:  f.Priority() != torrent.PiecePriorityNone,
+			Selected:  i < len(selection) && selection[i],
 		}
 	}
 	return out

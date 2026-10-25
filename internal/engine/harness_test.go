@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/anacrolix/torrent"
+
 	"github.com/moshen/bittrench/internal/config"
 	"github.com/moshen/bittrench/internal/store"
 	"github.com/moshen/bittrench/internal/tunneltest"
@@ -134,4 +136,23 @@ func waitForMetadata(t *testing.T, e *Engine, id int64) {
 	case <-time.After(15 * time.Second):
 		t.Fatalf("timed out waiting for the metadata of torrent %d", id)
 	}
+}
+
+// wanted reports, by path, which files have a piece priority right now - what
+// the torrent is actually downloading. Files reports the recorded selection
+// instead, which a paused or queued torrent keeps while it wants nothing.
+func wanted(t *testing.T, e *Engine, id int64) map[string]bool {
+	t.Helper()
+	rec := e.record(id)
+	if rec == nil {
+		t.Fatalf("no torrent with id %d", id)
+	}
+	out := make(map[string]bool)
+	if rec.Torrent.Info() == nil {
+		return out
+	}
+	for _, f := range rec.Torrent.Files() {
+		out[f.DisplayPath()] = f.Priority() != torrent.PiecePriorityNone
+	}
+	return out
 }
