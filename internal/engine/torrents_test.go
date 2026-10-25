@@ -270,18 +270,54 @@ func TestSelectingFilesOfAPausedTorrentDoesNotStartIt(t *testing.T) {
 	if err := h.engine.SetFileSelection(ctx, id, []bool{true, true}); err != nil {
 		t.Fatalf("SetFileSelection: %v", err)
 	}
+	for path, on := range wanted(t, h.engine, id) {
+		if on {
+			t.Errorf("%s is wanted although the torrent is paused", path)
+		}
+	}
+	// The choice is still reported while paused, or a client shows every file
+	// deselected and saves that back over it.
 	for _, f := range h.engine.Files(id) {
-		if f.Selected {
-			t.Errorf("%s is wanted although the torrent is paused", f.Path)
+		if !f.Selected {
+			t.Errorf("%s is reported deselected while paused", f.Path)
 		}
 	}
 	if err := h.engine.Start(ctx, id); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	for _, f := range h.engine.Files(id) {
-		if !f.Selected {
-			t.Errorf("%s is not wanted after starting", f.Path)
+	for path, on := range wanted(t, h.engine, id) {
+		if !on {
+			t.Errorf("%s is not wanted after starting", path)
 		}
+	}
+}
+
+// The info dict is in hand a moment before the watcher records the selection.
+// Reporting that gap as every file deselected invites a client to save its own
+// choice over the allow-list's, so it must read as no file list yet.
+func TestAnUndecidedSelectionReportsNoFiles(t *testing.T) {
+	mi, _ := buildTorrent(t, map[string]string{"movie.mkv": "video", "readme.nfo": "notes"})
+	h := newHarness(t, func(c *cfgOpts) { c.savePath = t.TempDir() })
+	id, _, err := h.engine.Add(context.Background(), AddRequest{Metainfo: mi, Paused: true})
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	h.waitForMetadata(t, id)
+
+	rec := h.engine.record(id)
+	h.engine.mu.Lock()
+	decided := rec.Selection
+	rec.Selection = nil
+	h.engine.mu.Unlock()
+	if files := h.engine.Files(id); files != nil {
+		t.Errorf("Files reported %d files before the selection was decided, want none", len(files))
+	}
+
+	h.engine.mu.Lock()
+	rec.Selection = decided
+	h.engine.mu.Unlock()
+	if n := len(h.engine.Files(id)); n != 2 {
+		t.Errorf("Files reported %d files once decided, want 2", n)
 	}
 }
 
@@ -387,10 +423,15 @@ func TestRestoreBringsTorrentsBack(t *testing.T) {
 		t.Fatalf("expected 2 files after restore, got %d", len(restoredFiles))
 	}
 	// The torrent came back paused, and paused means nothing is wanted - so
-	// the selection is recorded but not applied yet.
+	// the selection is recorded and reported, but not applied yet.
+	for path, on := range wanted(t, restored, id) {
+		if on {
+			t.Errorf("after restoring a paused torrent %s is already wanted", path)
+		}
+	}
 	for _, f := range restoredFiles {
-		if f.Selected {
-			t.Errorf("after restoring a paused torrent %s is already wanted", f.Path)
+		if want := filepath.Ext(f.Path) == ".mkv"; f.Selected != want {
+			t.Errorf("after restoring a paused torrent %s selected = %v, want %v", f.Path, f.Selected, want)
 		}
 	}
 	saved, err := h.store.FileSelection(ctx, id)
@@ -627,11 +668,6 @@ func TestPauseClearsPiecePrioritiesRatherThanDisallowingDownload(t *testing.T) {
 	if err := h.engine.Stop(ctx, id); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
-	for _, f := range h.engine.Files(id) {
-		if f.Selected {
-			t.Errorf("%s is still wanted after Stop; pause must clear piece priorities", f.Path)
-		}
-	}
 	rec := h.engine.record(id)
 	for _, f := range rec.Torrent.Files() {
 		if f.Priority() != torrent.PiecePriorityNone {
@@ -689,9 +725,9 @@ func TestPausedAddWantsNothing(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 	h.waitForMetadata(t, id)
-	for _, f := range h.engine.Files(id) {
-		if f.Selected {
-			t.Errorf("%s is wanted on a paused add", f.Path)
+	for path, on := range wanted(t, h.engine, id) {
+		if on {
+			t.Errorf("%s is wanted on a paused add", path)
 		}
 	}
 }

@@ -151,16 +151,32 @@ type File struct {
 	Path      string
 	Length    int64
 	Completed int64
-	Selected  bool
+	// Selected is whether the file is in the torrent's recorded selection,
+	// which a paused or queued torrent keeps while it wants nothing.
+	Selected bool
 }
 
-// Files returns a torrent's files, or nil if the gid is unknown or metadata
-// has not arrived. Nil rather than a panic is the whole point: Torrent.Files()
+// Files returns a torrent's files, or nil if the gid is unknown, metadata
+// has not arrived or the file selection is not yet decided. Nil rather than a panic is the whole point: Torrent.Files()
 // dereferences a nil pointer before the info dict resolves, and Radarr polls
 // torrent-get with fields:["files"] immediately after torrent-add.
 func (e *Engine) Files(id int64) []File {
 	rec := e.record(id)
 	if rec == nil || rec.Torrent.Info() == nil {
+		return nil
+	}
+	// The recorded selection, not live piece priorities: a paused or queued
+	// torrent wants nothing right now, and reporting that as its selection
+	// shows the client every file deselected and hands a client that edits
+	// the list an empty base to overwrite the real choice with.
+	e.mu.RLock()
+	selection := slices.Clone(rec.Selection)
+	e.mu.RUnlock()
+	// Undecided reads as no metadata yet, not as every file deselected: the
+	// info dict is in hand a moment before the watcher records the selection,
+	// and a client editing the list in that gap would save its own choice over
+	// the allow-list's.
+	if selection == nil {
 		return nil
 	}
 	files := rec.Torrent.Files()
@@ -171,7 +187,7 @@ func (e *Engine) Files(id int64) []File {
 			Path:      f.DisplayPath(),
 			Length:    f.Length(),
 			Completed: f.BytesCompleted(),
-			Selected:  f.Priority() != torrent.PiecePriorityNone,
+			Selected:  i < len(selection) && selection[i],
 		}
 	}
 	return out

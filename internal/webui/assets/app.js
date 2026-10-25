@@ -497,6 +497,11 @@ async function refreshExpanded() {
 	for (const id of state.expanded) {
 		promises.push(loadPeers(id));
 		promises.push(loadPieces(id));
+		// The file list loads once, on expanding, so a magnet opened before its
+		// metadata arrived would say so for good. Retry until there is a table.
+		if (!$(`files-${cssEscape(id)}`)?.querySelector("table")) {
+			promises.push(loadFiles(id));
+		}
 		const t = state.torrents.find((x) => torrentId(x) === id);
 		if (t) updateInfoSection(t);
 	}
@@ -636,7 +641,13 @@ async function loadFiles(id) {
 	const host = $(`files-${cssEscape(id)}`);
 	if (!host) return;
 	try {
+		// A queued save is newer than anything the server would return now,
+		// and its success does not reload the list.
+		while (fileSaves.has(id)) await fileSaves.get(id);
+		const edits = fileEdits.get(id);
 		const det = await api(`/torrents/${encodeURIComponent(id)}/files`);
+		// A selection change made while this was in flight is newer than det.
+		if (fileEdits.get(id) !== edits) return;
 		const files = det.files || [];
 		if (!files.length) {
 			host.textContent = "No file metadata yet.";
@@ -644,7 +655,7 @@ async function loadFiles(id) {
 		}
 		const onlyFiles = new Set(files.flatMap((f, i) => (f.selected ? [i] : [])));
 		let html =
-			'<table class="files"><thead><tr><th>✓</th><th>Name</th><th class="num">Size</th></tr></thead><tbody>';
+			'<table class="files"><thead><tr><th><input type="checkbox" class="all-files" title="Select all or none"></th><th>Name</th><th class="num">Size</th></tr></thead><tbody>';
 		files.forEach((f, i) => {
 			const checked = onlyFiles.has(i) ? " checked" : "";
 			html +=
@@ -654,8 +665,18 @@ async function loadFiles(id) {
 		});
 		html += "</tbody></table>";
 		host.innerHTML = html;
-		host.querySelectorAll("input[type=checkbox]").forEach((cb) => {
-			cb.addEventListener("change", () => onFileToggle(id, host));
+		const all = host.querySelector("input.all-files");
+		const boxes = host.querySelectorAll("input[data-fi]");
+		syncAllFiles(all, boxes);
+		// On the table rather than host: a failed save re-renders, and the
+		// listener goes with the table it replaces instead of piling up.
+		host.querySelector("table.files").addEventListener("change", (e) => {
+			if (e.target === all) {
+				for (const cb of boxes) cb.checked = all.checked;
+			} else {
+				syncAllFiles(all, boxes);
+			}
+			onFileToggle(id, host);
 		});
 	} catch (e) {
 		host.textContent = `Files unavailable: ${e.message}`;
@@ -690,10 +711,42 @@ function updateInfoSection(t) {
 		`<tr><th>Seed time</th><td>${seedSecs !== null ? fmtDuration(seedSecs) : "-"}</td></tr>`;
 }
 
-async function onFileToggle(id, host) {
+// syncAllFiles shows the header box checked when every file is selected,
+// clear when none is, and indeterminate in between.
+function syncAllFiles(all, boxes) {
+	const n = Array.from(boxes).filter((cb) => cb.checked).length;
+	all.checked = n === boxes.length;
+	all.indeterminate = n > 0 && n < boxes.length;
+}
+
+// fileSaves chains each torrent's selection saves. Every POST replaces the
+// whole selection and the server handles requests concurrently, so two quick
+// clicks sent side by side could land in either order, leaving the server on
+// the older choice while the checkboxes show the newer one.
+const fileSaves = new Map();
+
+// fileEdits counts each torrent's selection changes, so a list load that
+// started before one does not redraw over it.
+const fileEdits = new Map();
+
+function onFileToggle(id, host) {
 	const checked = Array.from(
-		host.querySelectorAll("input[type=checkbox]:checked"),
+		host.querySelectorAll("input[data-fi]:checked"),
 	).map((cb) => parseInt(cb.dataset.fi, 10));
+	fileEdits.set(id, (fileEdits.get(id) || 0) + 1);
+	const save = (fileSaves.get(id) || Promise.resolve()).then(() =>
+		saveFiles(id, checked, () => fileSaves.get(id) === save),
+	);
+	fileSaves.set(id, save);
+	save.then(() => {
+		if (fileSaves.get(id) === save) fileSaves.delete(id);
+	});
+}
+
+// saveFiles reloads the list after a failure only when it is the latest save:
+// a newer one is already queued with what the checkboxes show, and a reload
+// racing it could redraw the list from the selection before it.
+async function saveFiles(id, checked, isLatest) {
 	try {
 		await api(`/torrents/${encodeURIComponent(id)}/files`, {
 			method: "POST",
@@ -702,7 +755,7 @@ async function onFileToggle(id, host) {
 		});
 	} catch (e) {
 		alert(`Failed to update file selection: ${e.message}`);
-		loadFiles(id);
+		if (isLatest()) loadFiles(id);
 	}
 }
 
