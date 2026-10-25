@@ -636,7 +636,10 @@ async function loadFiles(id) {
 	const host = $(`files-${cssEscape(id)}`);
 	if (!host) return;
 	try {
+		const edits = fileEdits.get(id);
 		const det = await api(`/torrents/${encodeURIComponent(id)}/files`);
+		// A selection change made while this was in flight is newer than det.
+		if (fileEdits.get(id) !== edits) return;
 		const files = det.files || [];
 		if (!files.length) {
 			host.textContent = "No file metadata yet.";
@@ -714,10 +717,15 @@ function syncAllFiles(all, boxes) {
 // the older choice while the checkboxes show the newer one.
 const fileSaves = new Map();
 
+// fileEdits counts each torrent's selection changes, so a list load that
+// started before one does not redraw over it.
+const fileEdits = new Map();
+
 function onFileToggle(id, host) {
 	const checked = Array.from(
 		host.querySelectorAll("input[data-fi]:checked"),
 	).map((cb) => parseInt(cb.dataset.fi, 10));
+	fileEdits.set(id, (fileEdits.get(id) || 0) + 1);
 	const save = (fileSaves.get(id) || Promise.resolve()).then(() =>
 		saveFiles(id, checked, () => fileSaves.get(id) === save),
 	);
