@@ -292,6 +292,35 @@ func TestSelectingFilesOfAPausedTorrentDoesNotStartIt(t *testing.T) {
 	}
 }
 
+// The info dict is in hand a moment before the watcher records the selection.
+// Reporting that gap as every file deselected invites a client to save its own
+// choice over the allow-list's, so it must read as no file list yet.
+func TestAnUndecidedSelectionReportsNoFiles(t *testing.T) {
+	mi, _ := buildTorrent(t, map[string]string{"movie.mkv": "video", "readme.nfo": "notes"})
+	h := newHarness(t, func(c *cfgOpts) { c.savePath = t.TempDir() })
+	id, _, err := h.engine.Add(context.Background(), AddRequest{Metainfo: mi, Paused: true})
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	h.waitForMetadata(t, id)
+
+	rec := h.engine.record(id)
+	h.engine.mu.Lock()
+	decided := rec.Selection
+	rec.Selection = nil
+	h.engine.mu.Unlock()
+	if files := h.engine.Files(id); files != nil {
+		t.Errorf("Files reported %d files before the selection was decided, want none", len(files))
+	}
+
+	h.engine.mu.Lock()
+	rec.Selection = decided
+	h.engine.mu.Unlock()
+	if n := len(h.engine.Files(id)); n != 2 {
+		t.Errorf("Files reported %d files once decided, want 2", n)
+	}
+}
+
 // Pause is engine-owned state, since anacrolix/torrent has none, and it must
 // survive a restart.
 func TestPausedStateIsOwnedAndPersisted(t *testing.T) {
