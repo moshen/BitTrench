@@ -171,6 +171,37 @@ address, a port or a boolean is a startup error naming the variable. Everything
 else comes from the file. `BITTRENCH_LOG` sets the log level (`debug`, `info`,
 `warn`, `error`) and is not part of the schema.
 
+### HTTPS
+
+Set `tls = true` in the `[api]` table to serve the RPC endpoint and the web UI
+over HTTPS. On first start the daemon generates a self-signed certificate,
+`tls.crt` and `tls.key`, **beside the state database** (in `/config` in the
+container), logs its SHA-256 fingerprint, and reuses it on every start after
+that. To use your own certificate, put it and its key there under those names.
+To get a fresh self-signed one, delete both files. If only one of the two is
+there, the daemon refuses to start rather than overwrite the one that's left.
+
+It is **off by default** because turning it on breaks every client still
+configured for plain HTTP. Those clients get a `400 Client sent an HTTP request
+to an HTTPS server`. Sonarr and Radarr, like most Transmission clients, use
+plain HTTP unless told otherwise, and they check certificates once they switch.
+To point them at a TLS listener, change two settings in each app:
+
+1. On the Transmission download client, tick **Use SSL**.
+2. Under Settings → General → Security, set **Certificate Validation** to
+   **Disabled for Local Addresses**, if BitTrench is on the same host, LAN or
+   Docker network, or to **Disabled**. The default, **Enabled**, rejects a
+   self-signed certificate. This setting covers every connection the app makes,
+   not just this one. The alternative is to add `tls.crt` to the trust store of
+   the host or container Sonarr or Radarr runs in.
+
+A browser warns about the certificate the first time, for the same reason.
+
+The certificate is valid for 825 days, the longest Apple platforms accept even
+for a certificate you have trusted by hand, and the daemon warns at startup once
+it has expired. It names `localhost`, `127.0.0.1`, `::1`, the machine's
+hostname, and `listen_interface` when that is a specific address.
+
 ## Build and run
 
 The toolchain is pinned with mise, which also fixes `CGO_ENABLED=0` and

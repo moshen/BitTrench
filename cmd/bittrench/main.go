@@ -216,7 +216,7 @@ func openSession(ctx context.Context, cfg *config.AppConfig, configPath string) 
 
 	s := &session{db: db, completion: completion, tun: tun, eng: eng}
 	if cfg.API.Enabled {
-		if s.srv, err = server.New(cfg, eng); err != nil {
+		if s.srv, err = server.New(cfg, configPath, eng); err != nil {
 			s.close()
 			return nil, err
 		}
@@ -289,7 +289,7 @@ func run(ctx context.Context, configPath string) error {
 	if s.srv != nil {
 		go s.srv.Serve()
 		slog.Info("API and web UI listening", "addr", s.srv.Addr(),
-			"rpc", "http://"+s.srv.Addr().String()+rpc.Path)
+			"rpc", s.srv.URL()+rpc.Path)
 	} else {
 		slog.Warn("[api] enabled = false: no Transmission RPC endpoint and no web UI; " +
 			"this run can only be steered by restarting it")

@@ -60,7 +60,7 @@ func start(t *testing.T, customise func(*config.AppConfig)) (*Server, string) {
 	if customise != nil {
 		customise(&cfg)
 	}
-	srv, err := New(&cfg, &stubEngine{torrents: []engine.Status{{
+	srv, err := New(&cfg, filepath.Join(t.TempDir(), "config.toml"), &stubEngine{torrents: []engine.Status{{
 		ID: 1, Name: "one", State: engine.StateQueued, Queued: true, QueuePosition: 2,
 		TotalBytes: 1000, CompletedBytes: 400, SizeWhenDone: 800, LeftUntilDone: 400,
 		// The tail of a smoothed rate, as the sampler used to hand it over.
@@ -71,7 +71,7 @@ func start(t *testing.T, customise func(*config.AppConfig)) (*Server, string) {
 	}
 	go srv.Serve()
 	t.Cleanup(func() { srv.Shutdown(context.Background()) })
-	return srv, "http://" + srv.Addr().String()
+	return srv, srv.URL()
 }
 
 // The listener is the one host socket the daemon opens on purpose, and it must
@@ -258,7 +258,7 @@ func TestPeersSurviveANonFiniteRate(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Torrent.SavePath = t.TempDir()
 	cfg.API.ListenPort = 0
-	srv, err := New(&cfg, &stubEngine{
+	srv, err := New(&cfg, filepath.Join(t.TempDir(), "config.toml"), &stubEngine{
 		torrents: []engine.Status{{ID: 1, Name: "one"}},
 		peers: []engine.Peer{
 			{Addr: "10.0.0.5:6881", Client: "qBittorrent/5.1.0",
@@ -272,7 +272,7 @@ func TestPeersSurviveANonFiniteRate(t *testing.T) {
 	go srv.Serve()
 	t.Cleanup(func() { srv.Shutdown(context.Background()) })
 
-	resp, err := http.Get("http://" + srv.Addr().String() + api.Prefix + "/torrents/1/peers")
+	resp, err := http.Get(srv.URL() + api.Prefix + "/torrents/1/peers")
 	if err != nil {
 		t.Fatalf("GET peers: %v", err)
 	}

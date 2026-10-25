@@ -9,6 +9,7 @@ package server
 import (
 	"context"
 	"crypto/subtle"
+	"crypto/tls"
 	"encoding/base64"
 	"fmt"
 	"log/slog"
@@ -36,8 +37,9 @@ type Server struct {
 }
 
 // New builds the mux and binds the listener, so a port conflict is reported at
-// startup rather than from inside a goroutine.
-func New(cfg *config.AppConfig, eng Engine) (*Server, error) {
+// startup rather than from inside a goroutine. configPath locates the TLS key
+// pair, which sits beside the state database, when `[api] tls` is on.
+func New(cfg *config.AppConfig, configPath string, eng Engine) (*Server, error) {
 	mux := http.NewServeMux()
 
 	rpcHandler, err := rpc.New(eng, cfg)
@@ -61,6 +63,17 @@ func New(cfg *config.AppConfig, eng Engine) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Before the bind, so a certificate that cannot be loaded leaves no
+	// listener behind to close.
+	var tlsConfig *tls.Config
+	if cfg.API.TLS {
+		cert, err := loadOrCreateCertificate(cfg.TLSCertFile(configPath), cfg.TLSKeyFile(configPath),
+			certHosts(addr.Addr()))
+		if err != nil {
+			return nil, err
+		}
+		tlsConfig = &tls.Config{Certificates: []tls.Certificate{cert}}
+	}
 	listener, err := net.Listen("tcp", addr.String())
 	if err != nil {
 		return nil, fmt.Errorf("failed to bind the API listener on %s: %w", addr, err)
@@ -80,6 +93,7 @@ func New(cfg *config.AppConfig, eng Engine) (*Server, error) {
 	return &Server{
 		http: &http.Server{
 			Handler:           mux,
+			TLSConfig:         tlsConfig,
 			ReadHeaderTimeout: 10 * time.Second,
 			IdleTimeout:       120 * time.Second,
 		},
@@ -90,9 +104,26 @@ func New(cfg *config.AppConfig, eng Engine) (*Server, error) {
 // Addr is the bound address.
 func (s *Server) Addr() net.Addr { return s.listener.Addr() }
 
+// URL is the base URL clients reach the listener at, scheme included.
+func (s *Server) URL() string {
+	if s.http.TLSConfig != nil {
+		return "https://" + s.Addr().String()
+	}
+	return "http://" + s.Addr().String()
+}
+
 // Serve runs until Shutdown is called.
 func (s *Server) Serve() {
-	if err := s.http.Serve(s.listener); err != nil && err != http.ErrServerClosed {
+	var err error
+	if s.http.TLSConfig != nil {
+		// Empty file names: the certificate is already in TLSConfig. A plain
+		// HTTP request gets net/http's own 400 naming the mismatch, which is
+		// the one hint a client still configured for HTTP will see.
+		err = s.http.ServeTLS(s.listener, "", "")
+	} else {
+		err = s.http.Serve(s.listener)
+	}
+	if err != nil && err != http.ErrServerClosed {
 		slog.Error("the API server stopped", "error", err)
 	}
 }

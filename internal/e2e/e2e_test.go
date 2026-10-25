@@ -73,13 +73,13 @@ func TestLocalE2EWithRealTorrent(t *testing.T) {
 	}
 	defer eng.Close()
 
-	srv, err := server.New(&cfg, eng)
+	srv, err := server.New(&cfg, filepath.Join(t.TempDir(), "config.toml"), eng)
 	if err != nil {
 		t.Fatalf("server.New: %v", err)
 	}
 	go srv.Serve()
 	defer srv.Shutdown(ctx)
-	base := "http://" + srv.Addr().String()
+	base := srv.URL()
 	t.Logf("daemon listening on %s", base)
 
 	id, _, err := eng.Add(ctx, engine.AddRequest{Metainfo: blob})
