@@ -497,6 +497,11 @@ async function refreshExpanded() {
 	for (const id of state.expanded) {
 		promises.push(loadPeers(id));
 		promises.push(loadPieces(id));
+		// The file list loads once, on expanding, so a magnet opened before its
+		// metadata arrived would say so for good. Retry until there is a table.
+		if (!$(`files-${cssEscape(id)}`)?.querySelector("table")) {
+			promises.push(loadFiles(id));
+		}
 		const t = state.torrents.find((x) => torrentId(x) === id);
 		if (t) updateInfoSection(t);
 	}
