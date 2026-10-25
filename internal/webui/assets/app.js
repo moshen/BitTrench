@@ -636,6 +636,9 @@ async function loadFiles(id) {
 	const host = $(`files-${cssEscape(id)}`);
 	if (!host) return;
 	try {
+		// A queued save is newer than anything the server would return now,
+		// and its success does not reload the list.
+		while (fileSaves.has(id)) await fileSaves.get(id);
 		const edits = fileEdits.get(id);
 		const det = await api(`/torrents/${encodeURIComponent(id)}/files`);
 		// A selection change made while this was in flight is newer than det.
