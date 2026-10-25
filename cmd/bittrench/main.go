@@ -289,7 +289,7 @@ func run(ctx context.Context, configPath string) error {
 	if s.srv != nil {
 		go s.srv.Serve()
 		slog.Info("API and web UI listening", "addr", s.srv.Addr(),
-			"rpc", s.srv.URL()+rpc.Path)
+			"web_ui", s.srv.URL()+"/", "rpc", s.srv.URL()+rpc.Path)
 	} else {
 		slog.Warn("[api] enabled = false: no Transmission RPC endpoint and no web UI; " +
 			"this run can only be steered by restarting it")

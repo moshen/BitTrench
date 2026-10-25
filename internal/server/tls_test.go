@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -162,5 +163,28 @@ func TestTLSWarnsAboutAReadableKey(t *testing.T) {
 	startTLS(t, dir)
 	if !strings.Contains(logs.String(), "the API key is readable by other users") {
 		t.Errorf("no warning for a world-readable key; logs:\n%s", logs.String())
+	}
+}
+
+// The logged URLs are what an operator copies into a browser or a client, so
+// the scheme has to follow the config and a wildcard bind has to be reachable.
+func TestBaseURL(t *testing.T) {
+	for _, tc := range []struct {
+		addr string
+		tls  bool
+		want string
+	}{
+		{"127.0.0.1:6800", false, "http://127.0.0.1:6800"},
+		{"127.0.0.1:6800", true, "https://127.0.0.1:6800"},
+		{"0.0.0.0:6800", true, "https://localhost:6800"},
+		{"[::]:6800", false, "http://localhost:6800"},
+		{"[::1]:6800", false, "http://[::1]:6800"},
+		{"192.168.1.10:6800", true, "https://192.168.1.10:6800"},
+	} {
+		t.Run(tc.want, func(t *testing.T) {
+			if got := baseURL(tc.tls, netip.MustParseAddrPort(tc.addr)); got != tc.want {
+				t.Errorf("baseURL(%v, %s) = %s, want %s", tc.tls, tc.addr, got, tc.want)
+			}
+		})
 	}
 }

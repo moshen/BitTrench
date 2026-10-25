@@ -15,6 +15,8 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
+	"strconv"
 	"time"
 
 	"github.com/moshen/bittrench/internal/api"
@@ -104,12 +106,25 @@ func New(cfg *config.AppConfig, configPath string, eng Engine) (*Server, error) 
 // Addr is the bound address.
 func (s *Server) Addr() net.Addr { return s.listener.Addr() }
 
-// URL is the base URL clients reach the listener at, scheme included.
+// URL is the base URL clients reach the listener at, scheme included. It is
+// also the web UI's address, which is mounted at the root.
 func (s *Server) URL() string {
-	if s.http.TLSConfig != nil {
-		return "https://" + s.Addr().String()
+	return baseURL(s.http.TLSConfig != nil, s.listener.Addr().(*net.TCPAddr).AddrPort())
+}
+
+// baseURL names a wildcard bind as localhost: 0.0.0.0 is where the listener
+// accepts, not an address a browser can be pointed at, and the container image
+// binds exactly that. localhost is also in every generated certificate.
+func baseURL(useTLS bool, addr netip.AddrPort) string {
+	scheme := "http"
+	if useTLS {
+		scheme = "https"
 	}
-	return "http://" + s.Addr().String()
+	host := addr.Addr().Unmap().String()
+	if addr.Addr().IsUnspecified() {
+		host = "localhost"
+	}
+	return scheme + "://" + net.JoinHostPort(host, strconv.Itoa(int(addr.Port())))
 }
 
 // Serve runs until Shutdown is called.
