@@ -18,6 +18,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"runtime"
 	"time"
 )
 
@@ -47,6 +48,7 @@ func loadOrCreateCertificate(certFile, keyFile string, hosts []string) (tls.Cert
 		if err != nil {
 			return tls.Certificate{}, fmt.Errorf("failed to load the API certificate %s: %w", certFile, err)
 		}
+		warnIfKeyReadable(keyFile)
 		if cert.Leaf != nil && time.Now().After(cert.Leaf.NotAfter) {
 			slog.Warn("the API certificate has expired; delete it and its key to generate a new one",
 				"cert", certFile, "key", keyFile, "expired", cert.Leaf.NotAfter)
@@ -139,6 +141,26 @@ func certHosts(listen netip.Addr) []string {
 	return hosts
 }
 
+// warnIfKeyReadable warns about a key that anyone but its owner can read, as
+// ssh does. Only a warning: an operator's own key may be group-readable on
+// purpose, for a certificate manager that renews it. Windows reports
+// permission bits that say nothing about its ACLs, so it is not checked.
+func warnIfKeyReadable(keyFile string) {
+	if runtime.GOOS == "windows" {
+		return
+	}
+	info, err := os.Stat(keyFile)
+	if err != nil {
+		return
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		slog.Warn("the API key is readable by other users; chmod 600 it",
+			"key", keyFile, "mode", fmt.Sprintf("%o", perm))
+	}
+}
+
+// exists reports whether path exists, treating any error other than its
+// absence as a failure rather than as "no".
 func exists(path string) (bool, error) {
 	_, err := os.Stat(path)
 	switch {

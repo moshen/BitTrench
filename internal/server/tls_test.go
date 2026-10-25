@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -48,6 +49,7 @@ func trusting(t *testing.T, certFile string) *http.Client {
 	return &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}}
 }
 
+// The pair lands beside the state database, serves, and keeps its key private.
 func TestTLSGeneratesACertificateBesideTheDatabase(t *testing.T) {
 	dir := t.TempDir()
 	srv := startTLS(t, dir)
@@ -137,5 +139,28 @@ func TestTLSRefusesHalfAKeyPair(t *testing.T) {
 				t.Errorf("%s was overwritten: %q", present, got)
 			}
 		})
+	}
+}
+
+// A key someone else can read is no longer a secret, and a warning at startup
+// is the only place an operator will hear about it.
+func TestTLSWarnsAboutAReadableKey(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows permission bits say nothing about its ACLs")
+	}
+	dir := t.TempDir()
+	startTLS(t, dir).Shutdown(context.Background())
+	if err := os.Chmod(filepath.Join(dir, "tls.key"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	startTLS(t, dir)
+	if !strings.Contains(logs.String(), "the API key is readable by other users") {
+		t.Errorf("no warning for a world-readable key; logs:\n%s", logs.String())
 	}
 }

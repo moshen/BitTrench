@@ -185,22 +185,29 @@ It is **off by default** because turning it on breaks every client still
 configured for plain HTTP. Those clients get a `400 Client sent an HTTP request
 to an HTTPS server`. Sonarr and Radarr, like most Transmission clients, use
 plain HTTP unless told otherwise, and they check certificates once they switch.
-To point them at a TLS listener, change two settings in each app:
+To point them at a TLS listener:
 
 1. On the Transmission download client, tick **Use SSL**.
-2. Under Settings → General → Security, set **Certificate Validation** to
-   **Disabled for Local Addresses**, if BitTrench is on the same host, LAN or
-   Docker network, or to **Disabled**. The default, **Enabled**, rejects a
-   self-signed certificate. This setting covers every connection the app makes,
-   not just this one. The alternative is to add `tls.crt` to the trust store of
-   the host or container Sonarr or Radarr runs in.
+2. **Trust `tls.crt`** in the host or container Sonarr or Radarr runs in, by
+   adding it to that system's CA store. This is the way to do it: their
+   certificate checks stay on, and only this certificate is added.
+
+If that isn't practical, Settings → General → Security → **Certificate
+Validation** can be set to **Disabled for Local Addresses**, which accepts the
+self-signed certificate when BitTrench is on the same host, LAN or Docker
+network. This setting covers every connection the app makes to a local address,
+not just this one, so anything on your network could then impersonate any of
+them. Avoid **Disabled**: it turns the checks off for the indexers and every
+other service too.
 
 A browser warns about the certificate the first time, for the same reason.
 
 The certificate is valid for 825 days, the longest Apple platforms accept even
 for a certificate you have trusted by hand, and the daemon warns at startup once
 it has expired. It names `localhost`, `127.0.0.1`, `::1`, the machine's
-hostname, and `listen_interface` when that is a specific address.
+hostname, and `listen_interface` when that is a specific address. A key that
+other users can read is warned about at startup, as `ssh` does; on Windows the
+file's ACLs are yours to check.
 
 ## Build and run
 

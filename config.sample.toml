@@ -58,8 +58,9 @@ password = "change-me"
 # Off by default because turning it on breaks every client still configured for
 # plain HTTP. Sonarr and Radarr connect to Transmission over HTTP unless "Use
 # SSL" is ticked on the download client, and once it is they reject a
-# self-signed certificate unless Settings > General > Certificate Validation is
-# "Disabled for Local Addresses" or "Disabled". See the README. Default: false
+# self-signed certificate until tls.crt is trusted on the system they run on.
+# The README covers that, and the weaker fallback of relaxing their
+# Certificate Validation setting. Default: false
 # tls = false
 
 [torrent]
