@@ -108,8 +108,11 @@ func generateCertificate(hosts []string, now time.Time) (certPEM, keyPEM []byte,
 		BasicConstraintsValid: true,
 	}
 	for _, h := range hosts {
-		if ip := net.ParseIP(h); ip != nil {
-			template.IPAddresses = append(template.IPAddresses, ip)
+		// netip rather than net.ParseIP, which rejects a scoped address and
+		// would file fe80::1%eth0 as a DNS name. A certificate cannot carry
+		// the zone, and Go's verifier drops it from the client's side too.
+		if ip, err := netip.ParseAddr(h); err == nil {
+			template.IPAddresses = append(template.IPAddresses, ip.WithZone("").AsSlice())
 		} else {
 			template.DNSNames = append(template.DNSNames, h)
 		}
@@ -127,18 +130,37 @@ func generateCertificate(hosts []string, now time.Time) (certPEM, keyPEM []byte,
 }
 
 // certHosts is what the generated certificate names: loopback under both
-// spellings, this machine's hostname, and the listen address when it is a
-// specific one. A wildcard bind has no single address to name, and a
-// container's own address is one no client outside it uses anyway.
-func certHosts(listen netip.Addr) []string {
+// spellings, this machine's hostname, and the listen address. A wildcard bind
+// is reachable at every interface address, so it names each of them, read from
+// interfaceAddrs - net.InterfaceAddrs outside the tests. Those are the
+// addresses at generation time: a later DHCP lease is not in the certificate,
+// and nor is a container's published host IP, which is not visible from
+// inside it. The hostname covers both, or an operator's own certificate does.
+func certHosts(listen netip.Addr, interfaceAddrs func() ([]net.Addr, error)) []string {
 	hosts := []string{"localhost", "127.0.0.1", "::1"}
 	if name, err := os.Hostname(); err == nil && name != "" && name != "localhost" {
 		hosts = append(hosts, name)
 	}
-	if !listen.IsUnspecified() && !listen.IsLoopback() {
+	if !listen.IsUnspecified() {
 		hosts = append(hosts, listen.String())
+	} else if addrs, err := interfaceAddrs(); err == nil {
+		for _, a := range addrs {
+			if prefix, err := netip.ParsePrefix(a.String()); err == nil && !prefix.Addr().IsLoopback() {
+				hosts = append(hosts, prefix.Addr().String())
+			}
+		}
 	}
-	return hosts
+	// 127.0.0.1 named twice, by default and as the listen address, is
+	// harmless to a client but noise in the log line that lists them.
+	seen := make(map[string]bool, len(hosts))
+	unique := hosts[:0]
+	for _, h := range hosts {
+		if !seen[h] {
+			seen[h] = true
+			unique = append(unique, h)
+		}
+	}
+	return unique
 }
 
 // warnIfKeyReadable warns about a key that anyone but its owner can read, as

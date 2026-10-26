@@ -6,14 +6,17 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/moshen/bittrench/internal/config"
 )
@@ -193,5 +196,71 @@ func TestBaseURL(t *testing.T) {
 				t.Errorf("baseURL(%v, %s) = %s, which does not parse: %v", tc.tls, tc.addr, got, err)
 			}
 		})
+	}
+}
+
+// Every address the listener can be reached at has to be one the certificate
+// names, or a client checking it rejects the connection for a name mismatch.
+func TestCertHostsNameEveryReachableAddress(t *testing.T) {
+	interfaces := func() ([]net.Addr, error) {
+		return []net.Addr{
+			&net.IPNet{IP: net.ParseIP("127.0.0.1"), Mask: net.CIDRMask(8, 32)},
+			&net.IPNet{IP: net.ParseIP("192.168.1.10"), Mask: net.CIDRMask(24, 32)},
+			&net.IPNet{IP: net.ParseIP("fd00::10"), Mask: net.CIDRMask(64, 128)},
+		}, nil
+	}
+	for _, tc := range []struct {
+		listen  string
+		want    []string
+		notWant []string
+	}{
+		{listen: "0.0.0.0", want: []string{"192.168.1.10", "fd00::10"}},
+		{listen: "::", want: []string{"192.168.1.10", "fd00::10"}},
+		{listen: "127.0.0.2", want: []string{"127.0.0.2"}, notWant: []string{"192.168.1.10"}},
+		{listen: "192.168.1.10", want: []string{"192.168.1.10"}, notWant: []string{"fd00::10"}},
+		{listen: "fe80::1%eth0", want: []string{"fe80::1%eth0"}},
+	} {
+		t.Run(tc.listen, func(t *testing.T) {
+			hosts := certHosts(netip.MustParseAddr(tc.listen), interfaces)
+			for _, want := range append([]string{"localhost", "127.0.0.1", "::1"}, tc.want...) {
+				if !slices.Contains(hosts, want) {
+					t.Errorf("certHosts(%s) = %v, missing %s", tc.listen, hosts, want)
+				}
+			}
+			for _, notWant := range tc.notWant {
+				if slices.Contains(hosts, notWant) {
+					t.Errorf("certHosts(%s) = %v, should not name %s", tc.listen, hosts, notWant)
+				}
+			}
+			seen := map[string]bool{}
+			for _, h := range hosts {
+				if seen[h] {
+					t.Errorf("certHosts(%s) = %v, names %s twice", tc.listen, hosts, h)
+				}
+				seen[h] = true
+			}
+		})
+	}
+}
+
+// The names have to land where a verifier looks: an IP in IPAddresses, which
+// for a scoped address means without its zone, since Go strips the client's.
+func TestGeneratedCertificateVerifiesForItsHosts(t *testing.T) {
+	hosts := []string{"localhost", "127.0.0.2", "fe80::1%eth0", "192.168.1.10"}
+	certPEM, keyPEM, err := generateCertificate(hosts, time.Now())
+	if err != nil {
+		t.Fatalf("generateCertificate: %v", err)
+	}
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		t.Fatalf("X509KeyPair: %v", err)
+	}
+	for _, h := range hosts {
+		if err := cert.Leaf.VerifyHostname(h); err != nil {
+			t.Errorf("VerifyHostname(%s): %v", h, err)
+		}
+	}
+	if slices.Contains(cert.Leaf.DNSNames, "fe80::1%eth0") {
+		t.Error("the scoped address was filed as a DNS name")
 	}
 }

@@ -71,7 +71,7 @@ func New(cfg *config.AppConfig, configPath string, eng Engine) (*Server, error) 
 	var tlsConfig *tls.Config
 	if cfg.API.TLS {
 		cert, err := loadOrCreateCertificate(cfg.TLSCertFile(configPath), cfg.TLSKeyFile(configPath),
-			certHosts(addr.Addr()))
+			certHosts(addr.Addr(), net.InterfaceAddrs))
 		if err != nil {
 			return nil, err
 		}

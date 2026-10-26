@@ -205,7 +205,10 @@ A browser warns about the certificate the first time, for the same reason.
 The certificate is valid for 825 days, the longest Apple platforms accept even
 for a certificate you have trusted by hand, and the daemon warns at startup once
 it has expired. It names `localhost`, `127.0.0.1`, `::1`, the machine's
-hostname, and `listen_interface` when that is a specific address. A key that
+hostname, and `listen_interface` - or, when that is `0.0.0.0` or `::`, every
+address the machine's interfaces had when the certificate was generated. An
+address that arrives later, such as a new DHCP lease or a container's published
+host IP, is not in it; connect by hostname, or delete both files to regenerate. A key that
 other users can read is warned about at startup, as `ssh` does; on Windows the
 file's ACLs are yours to check.
 
