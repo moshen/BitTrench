@@ -63,6 +63,12 @@ type APIConfig struct {
 	// Transmission RPC endpoint and the web UI. Empty disables auth.
 	Username string `toml:"username"`
 	Password string `toml:"password"`
+	// TLS serves the listener over HTTPS with a self-signed certificate,
+	// generated on first start beside the state database and reused after.
+	// Off by default because Sonarr, Radarr and most Transmission clients
+	// default to plain HTTP and validate certificates once switched, so
+	// turning it on breaks every client until each one is reconfigured.
+	TLS bool `toml:"tls"`
 }
 
 // TorrentConfig is the `[torrent]` table.
@@ -358,6 +364,17 @@ func (c *AppConfig) StateDBFile(configPath string) string {
 		return c.Torrent.StateDBPath
 	}
 	return filepath.Join(configDir(configPath), "state.db")
+}
+
+// TLSCertFile is the API listener's PEM certificate, `tls.crt` beside the
+// state database wherever that resolves to.
+func (c *AppConfig) TLSCertFile(configPath string) string {
+	return filepath.Join(filepath.Dir(c.StateDBFile(configPath)), "tls.crt")
+}
+
+// TLSKeyFile is the PEM private key for TLSCertFile, `tls.key` beside it.
+func (c *AppConfig) TLSKeyFile(configPath string) string {
+	return filepath.Join(filepath.Dir(c.StateDBFile(configPath)), "tls.key")
 }
 
 // LogDir is the resolved log directory, defaulting to `logs/` beside the

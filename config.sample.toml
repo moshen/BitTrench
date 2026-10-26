@@ -50,6 +50,18 @@ listen_port = 6800
 # which is reasonable for localhost-only use.
 username = "change-me"
 password = "change-me"
+# Serve the RPC endpoint and the web UI over HTTPS instead of HTTP. On first
+# start the daemon generates a self-signed certificate, `tls.crt` and
+# `tls.key`, beside the state database and reuses it after that. Put your own
+# certificate and key there under those names to use them instead.
+#
+# Off by default because turning it on breaks every client still configured for
+# plain HTTP. Sonarr and Radarr connect to Transmission over HTTP unless "Use
+# SSL" is ticked on the download client, and once it is they reject a
+# self-signed certificate until tls.crt is trusted on the system they run on.
+# The README covers that, and the weaker fallback of relaxing their
+# Certificate Validation setting. Default: false
+# tls = false
 
 [torrent]
 # Where downloads are written. Required.

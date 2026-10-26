@@ -37,6 +37,7 @@ func TestSampleDocumentsTheKeys(t *testing.T) {
 		"enabled",
 		"download_queue_size",
 		"to_file",
+		"tls",
 	} {
 		if !strings.Contains(string(sample), key) {
 			t.Errorf("config.sample.toml does not document %s", key)
@@ -89,6 +90,11 @@ func TestDefaultsSurviveAnAbsentKey(t *testing.T) {
 	}
 	if got := cfg.Torrent.DownloadQueueSize; got != 5 {
 		t.Errorf("download_queue_size default = %d, want 5", got)
+	}
+	// Turning it on breaks every client still configured for plain HTTP, so
+	// an existing config must not get it by upgrading.
+	if cfg.API.TLS {
+		t.Error("api.tls should default to false")
 	}
 }
 
@@ -249,8 +255,16 @@ func TestResolvedPathsFollowTheConfigFile(t *testing.T) {
 		filepath.Join("/etc", "wg-bt", "logs"); got != want {
 		t.Errorf("LogDir = %q, want %q", got, want)
 	}
+	if got, want := cfg.TLSCertFile(filepath.Join("/etc", "wg-bt", "config.toml")),
+		filepath.Join("/etc", "wg-bt", "tls.crt"); got != want {
+		t.Errorf("TLSCertFile = %q, want %q", got, want)
+	}
 	cfg.Torrent.StateDBPath = "/var/lib/wg/state.db"
 	cfg.Logging.LogDir = "/var/log/wg"
+	// The certificate follows the database, not the config file.
+	if got, want := cfg.TLSKeyFile("config.toml"), filepath.Join("/var/lib/wg", "tls.key"); got != want {
+		t.Errorf("TLSKeyFile = %q, want %q", got, want)
+	}
 	if got := cfg.StateDBFile("config.toml"); got != "/var/lib/wg/state.db" {
 		t.Errorf("explicit state_db_path ignored: %q", got)
 	}

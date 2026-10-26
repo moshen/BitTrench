@@ -9,11 +9,15 @@ package server
 import (
 	"context"
 	"crypto/subtle"
+	"crypto/tls"
 	"encoding/base64"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
+	"net/url"
+	"strconv"
 	"time"
 
 	"github.com/moshen/bittrench/internal/api"
@@ -36,8 +40,9 @@ type Server struct {
 }
 
 // New builds the mux and binds the listener, so a port conflict is reported at
-// startup rather than from inside a goroutine.
-func New(cfg *config.AppConfig, eng Engine) (*Server, error) {
+// startup rather than from inside a goroutine. configPath locates the TLS key
+// pair, which sits beside the state database, when `[api] tls` is on.
+func New(cfg *config.AppConfig, configPath string, eng Engine) (*Server, error) {
 	mux := http.NewServeMux()
 
 	rpcHandler, err := rpc.New(eng, cfg)
@@ -61,6 +66,17 @@ func New(cfg *config.AppConfig, eng Engine) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Before the bind, so a certificate that cannot be loaded leaves no
+	// listener behind to close.
+	var tlsConfig *tls.Config
+	if cfg.API.TLS {
+		cert, err := loadOrCreateCertificate(cfg.TLSCertFile(configPath), cfg.TLSKeyFile(configPath),
+			certHosts(addr.Addr(), net.InterfaceAddrs))
+		if err != nil {
+			return nil, err
+		}
+		tlsConfig = &tls.Config{Certificates: []tls.Certificate{cert}}
+	}
 	listener, err := net.Listen("tcp", addr.String())
 	if err != nil {
 		return nil, fmt.Errorf("failed to bind the API listener on %s: %w", addr, err)
@@ -80,6 +96,7 @@ func New(cfg *config.AppConfig, eng Engine) (*Server, error) {
 	return &Server{
 		http: &http.Server{
 			Handler:           mux,
+			TLSConfig:         tlsConfig,
 			ReadHeaderTimeout: 10 * time.Second,
 			IdleTimeout:       120 * time.Second,
 		},
@@ -90,9 +107,42 @@ func New(cfg *config.AppConfig, eng Engine) (*Server, error) {
 // Addr is the bound address.
 func (s *Server) Addr() net.Addr { return s.listener.Addr() }
 
+// URL is the base URL clients reach the listener at, scheme included. It is
+// also the web UI's address, which is mounted at the root.
+func (s *Server) URL() string {
+	return baseURL(s.http.TLSConfig != nil, s.listener.Addr().(*net.TCPAddr).AddrPort())
+}
+
+// baseURL names a wildcard bind as localhost: 0.0.0.0 is where the listener
+// accepts, not an address a browser can be pointed at, and the container image
+// binds exactly that. localhost is also in every generated certificate.
+func baseURL(useTLS bool, addr netip.AddrPort) string {
+	scheme := "http"
+	if useTLS {
+		scheme = "https"
+	}
+	host := addr.Addr().Unmap().String()
+	if addr.Addr().IsUnspecified() {
+		host = "localhost"
+	}
+	// url.URL rather than concatenation, so a scoped IPv6 bind's zone comes
+	// out as %25eth0, the only spelling a URL parser accepts.
+	u := url.URL{Scheme: scheme, Host: net.JoinHostPort(host, strconv.Itoa(int(addr.Port())))}
+	return u.String()
+}
+
 // Serve runs until Shutdown is called.
 func (s *Server) Serve() {
-	if err := s.http.Serve(s.listener); err != nil && err != http.ErrServerClosed {
+	var err error
+	if s.http.TLSConfig != nil {
+		// Empty file names: the certificate is already in TLSConfig. A plain
+		// HTTP request gets net/http's own 400 naming the mismatch, which is
+		// the one hint a client still configured for HTTP will see.
+		err = s.http.ServeTLS(s.listener, "", "")
+	} else {
+		err = s.http.Serve(s.listener)
+	}
+	if err != nil && err != http.ErrServerClosed {
 		slog.Error("the API server stopped", "error", err)
 	}
 }
