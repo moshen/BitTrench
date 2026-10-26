@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -180,10 +181,16 @@ func TestBaseURL(t *testing.T) {
 		{"[::]:6800", false, "http://localhost:6800"},
 		{"[::1]:6800", false, "http://[::1]:6800"},
 		{"192.168.1.10:6800", true, "https://192.168.1.10:6800"},
+		{"[fe80::1%eth0]:6800", true, "https://[fe80::1%25eth0]:6800"},
 	} {
 		t.Run(tc.want, func(t *testing.T) {
-			if got := baseURL(tc.tls, netip.MustParseAddrPort(tc.addr)); got != tc.want {
+			got := baseURL(tc.tls, netip.MustParseAddrPort(tc.addr))
+			if got != tc.want {
 				t.Errorf("baseURL(%v, %s) = %s, want %s", tc.tls, tc.addr, got, tc.want)
+			}
+			// What is logged has to survive a client parsing it back.
+			if _, err := url.Parse(got); err != nil {
+				t.Errorf("baseURL(%v, %s) = %s, which does not parse: %v", tc.tls, tc.addr, got, err)
 			}
 		})
 	}

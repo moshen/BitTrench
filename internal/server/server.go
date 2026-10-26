@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"strconv"
 	"time"
 
@@ -124,7 +125,10 @@ func baseURL(useTLS bool, addr netip.AddrPort) string {
 	if addr.Addr().IsUnspecified() {
 		host = "localhost"
 	}
-	return scheme + "://" + net.JoinHostPort(host, strconv.Itoa(int(addr.Port())))
+	// url.URL rather than concatenation, so a scoped IPv6 bind's zone comes
+	// out as %25eth0, the only spelling a URL parser accepts.
+	u := url.URL{Scheme: scheme, Host: net.JoinHostPort(host, strconv.Itoa(int(addr.Port())))}
+	return u.String()
 }
 
 // Serve runs until Shutdown is called.
